@@ -1,0 +1,27 @@
+.venv/
+.semi_agent/
+__pycache__/
+*.pyc
+
+# Python cache/build
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments and local config
+.env
+.env.*
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS artifacts
+Thumbs.db
+Desktop.ini
