@@ -119,105 +119,130 @@ def test_load_and_save_config(monkeypatch):
     assert saved["provider_key"] == "kimi"
 
 
-def test_open_login_browser_existing_session(monkeypatch):
+@pytest.mark.asyncio
+async def test_open_login_browser_existing_session(monkeypatch):
     monkeypatch.setitem(web_app.LOGIN_STATE, "context", object())
-    msg, _ = web_app._open_login_browser()
+    msg, _ = await web_app._open_login_browser()
     assert "已打开" in msg
     web_app.LOGIN_STATE["context"] = None
 
 
-def test_open_login_browser_fail(monkeypatch):
+@pytest.mark.asyncio
+async def test_open_login_browser_fail(monkeypatch):
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"target_url": "x", "navigation_timeout_seconds": 10})
 
-    def bad_open(_cfg):
+    async def bad_open(_cfg):
         raise RuntimeError("no browser")
 
     monkeypatch.setattr(web_app.core, "open_chat_page", bad_open)
-    msg, _ = web_app._open_login_browser()
+    msg, _ = await web_app._open_login_browser()
     assert "失败" in msg
 
 
-def test_finish_login_no_session():
+@pytest.mark.asyncio
+async def test_finish_login_no_session():
     web_app.LOGIN_STATE["page"] = None
-    msg, _ = web_app._finish_login_check()
+    msg, _ = await web_app._finish_login_check()
     assert "未检测到" in msg
 
 
-def test_finish_login_success(monkeypatch):
+@pytest.mark.asyncio
+async def test_finish_login_success(monkeypatch):
     web_app.LOGIN_STATE["page"] = object()
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"input_selectors": ["x"]})
-    monkeypatch.setattr(web_app.core, "get_first_visible_locator", lambda p, s, timeout_ms=0: object())
-    monkeypatch.setattr(web_app, "_close_login_session", lambda: None)
-    msg, _ = web_app._finish_login_check()
+    async def fake_get_loc_obj(*a, **k): return object()
+    monkeypatch.setattr(web_app.core, "get_first_visible_locator", fake_get_loc_obj)
+    async def fake_close(): pass
+    monkeypatch.setattr(web_app, "_close_login_session", fake_close)
+    msg, _ = await web_app._finish_login_check()
     assert "通过" in msg
 
 
-def test_finish_login_fail(monkeypatch):
+@pytest.mark.asyncio
+async def test_finish_login_fail(monkeypatch):
     web_app.LOGIN_STATE["page"] = object()
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"input_selectors": ["x"]})
-    monkeypatch.setattr(web_app.core, "get_first_visible_locator", lambda p, s, timeout_ms=0: None)
-    monkeypatch.setattr(web_app, "_close_login_session", lambda: None)
-    msg, _ = web_app._finish_login_check()
+    async def fake_get_loc_none(*a, **k): return None
+    monkeypatch.setattr(web_app.core, "get_first_visible_locator", fake_get_loc_none)
+    async def fake_close(): pass
+    monkeypatch.setattr(web_app, "_close_login_session", fake_close)
+    msg, _ = await web_app._finish_login_check()
     assert "未检测到" in msg
 
 
-def test_run_smoke_requires_confirm():
-    msg, _ = web_app._run_smoke_test(False, 0)
+@pytest.mark.asyncio
+async def test_run_smoke_requires_confirm():
+    msg, _ = await web_app._run_smoke_test(False, 0)
     assert "勾选" in msg
 
 
-def test_run_smoke_success(monkeypatch):
+@pytest.mark.asyncio
+async def test_run_smoke_success(monkeypatch):
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"confirm_before_send": True, "smoke_pause_seconds": 0})
-    monkeypatch.setattr(web_app.core, "send_with_retry", lambda cfg, prompt: "READY")
+    async def fake_send_with_retry_ready(cfg, p):
+        yield "READY"
+    monkeypatch.setattr(web_app.core, "send_with_retry", fake_send_with_retry_ready)
     records = []
     monkeypatch.setattr(web_app.core, "append_history", lambda row: records.append(row))
-    msg, _ = web_app._run_smoke_test(True, 0)
+    msg, _ = await web_app._run_smoke_test(True, 0)
     assert "成功" in msg
     assert records and records[0]["ok"] is True
 
 
-def test_run_smoke_fail(monkeypatch):
+@pytest.mark.asyncio
+async def test_run_smoke_fail(monkeypatch):
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"confirm_before_send": True, "smoke_pause_seconds": 0})
 
-    def boom(cfg, prompt):
+    async def boom(cfg, prompt):
         raise RuntimeError("x")
+        yield ""
 
     monkeypatch.setattr(web_app.core, "send_with_retry", boom)
     records = []
     monkeypatch.setattr(web_app.core, "append_history", lambda row: records.append(row))
-    msg, _ = web_app._run_smoke_test(True, 0)
+    msg, _ = await web_app._run_smoke_test(True, 0)
     assert "失败" in msg
     assert records and records[0]["ok"] is False
 
 
-def test_one_click_prepare(monkeypatch):
-    monkeypatch.setattr(web_app, "_open_login_browser", lambda: ("已打开", "g"))
-    msg, guide = web_app._one_click_prepare()
+@pytest.mark.asyncio
+async def test_one_click_prepare(monkeypatch):
+    async def fake_open_browser(*a, **k): return ("已打开", "g")
+    monkeypatch.setattr(web_app, "_open_login_browser", fake_open_browser)
+    msg, guide = await web_app._one_click_prepare()
     assert "自动准备" in msg
     assert guide == "g"
 
 
-def test_run_task_empty(monkeypatch):
+@pytest.mark.asyncio
+async def test_run_task_empty(monkeypatch):
     monkeypatch.setattr(web_app, "_history_table", lambda mode="全部": [])
-    status, *_ = web_app._run_task("摘要总结", "", True)
+    async for state in web_app._run_task("摘要总结", "", True):
+        status, *_ = state
     assert "取消" in status
 
 
-def test_run_task_require_confirm(monkeypatch):
+@pytest.mark.asyncio
+async def test_run_task_require_confirm(monkeypatch):
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"confirm_before_send": True})
     monkeypatch.setattr(web_app, "_history_table", lambda mode="全部": [])
-    status, *_ = web_app._run_task("摘要总结", "abc", False)
+    async for state in web_app._run_task("摘要总结", "abc", False):
+        status, *_ = state
     assert "勾选" in status
 
 
-def test_run_task_success(monkeypatch):
+@pytest.mark.asyncio
+async def test_run_task_success(monkeypatch):
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"confirm_before_send": True})
     monkeypatch.setattr(web_app.core, "build_prompt", lambda key, text: f"{key}:{text}")
-    monkeypatch.setattr(web_app.core, "send_with_retry", lambda cfg, prompt: "ok")
+    async def fake_send_with_retry_ok(cfg, p):
+        yield "ok"
+    monkeypatch.setattr(web_app.core, "send_with_retry", fake_send_with_retry_ok)
     rows = []
     monkeypatch.setattr(web_app.core, "append_history", lambda row: rows.append(row))
     monkeypatch.setattr(web_app, "_history_table", lambda mode="全部": [["x"]])
-    status, prompt, response, _, hist = web_app._run_task("摘要总结", "abc", True)
+    async for state in web_app._run_task("摘要总结", "abc", True):
+        status, prompt, response, _, hist = state
     assert "成功" in status
     assert prompt.startswith("summary")
     assert response == "ok"
@@ -225,18 +250,21 @@ def test_run_task_success(monkeypatch):
     assert rows and rows[0]["ok"] is True
 
 
-def test_run_task_fail(monkeypatch):
+@pytest.mark.asyncio
+async def test_run_task_fail(monkeypatch):
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"confirm_before_send": True})
     monkeypatch.setattr(web_app.core, "build_prompt", lambda key, text: f"{key}:{text}")
 
-    def boom(cfg, prompt):
+    async def boom(cfg, prompt):
         raise RuntimeError("fail")
+        yield ""
 
     monkeypatch.setattr(web_app.core, "send_with_retry", boom)
     rows = []
     monkeypatch.setattr(web_app.core, "append_history", lambda row: rows.append(row))
     monkeypatch.setattr(web_app, "_history_table", lambda mode="全部": [["x"]])
-    status, *_ = web_app._run_task("摘要总结", "abc", True)
+    async for state in web_app._run_task("摘要总结", "abc", True):
+        status, *_ = state
     assert "失败" in status
     assert rows and rows[0]["ok"] is False
 

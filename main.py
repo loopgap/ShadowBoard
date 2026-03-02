@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import asyncio
 import time
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / ".semi_agent"
@@ -144,36 +145,37 @@ def build_prompt(template_key: str, user_input: str) -> str:
     return TEMPLATES[template_key].format(user_input=user_input)
 
 
-def get_first_visible_locator(page, selectors: List[str], timeout_ms: int):
+async def get_first_visible_locator(page, selectors: List[str], timeout_ms: int):
     for selector in selectors:
         locator = page.locator(selector).first
         try:
-            locator.wait_for(timeout=timeout_ms)
+            await locator.wait_for(timeout=timeout_ms)
             return locator
         except PlaywrightTimeoutError:
             continue
     return None
 
 
-def get_latest_response_text(page, selectors: List[str]) -> str:
+async def get_latest_response_text(page, selectors: List[str]) -> str:
     best = ""
     for selector in selectors:
         loc = page.locator(selector)
-        count = loc.count()
+        count = await loc.count()
         if count <= 0:
             continue
-        text = loc.nth(count - 1).inner_text().strip()
+        text = await loc.nth(count - 1).inner_text()
+        text = text.strip()
         if len(text) > len(best):
             best = text
     return best
 
 
-def save_error_snapshot(page, error: Exception) -> Path:
+async def save_error_snapshot(page, error: Exception) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     shot_path = ERROR_DIR / f"error_{ts}.png"
     txt_path = ERROR_DIR / f"error_{ts}.txt"
     try:
-        page.screenshot(path=str(shot_path), full_page=True)
+        await page.screenshot(path=str(shot_path), full_page=True)
     except Exception:
         pass
     txt_path.write_text(
@@ -188,31 +190,32 @@ def save_error_snapshot(page, error: Exception) -> Path:
     return txt_path
 
 
-def wait_for_response(page, selectors: List[str], timeout_seconds: int, stable_seconds: int) -> str:
+async def wait_for_response(page, selectors: List[str], timeout_seconds: int, stable_seconds: int):
     start = time.time()
     last = ""
     last_change = time.time()
 
     while time.time() - start < timeout_seconds:
         try:
-            current = get_latest_response_text(page, selectors)
+            current = await get_latest_response_text(page, selectors)
         except Exception:
             current = ""
 
         if current and current != last:
             last = current
             last_change = time.time()
+            yield last
 
         if last and (time.time() - last_change) >= stable_seconds:
-            return last
+            return
 
-        time.sleep(1)
+        await asyncio.sleep(1)
 
     raise TimeoutError("Timed out while waiting for response.")
 
 
-def open_chat_page(config: Dict[str, Any]):
-    p = sync_playwright().start()
+async def open_chat_page(config: Dict[str, Any]):
+    p = await async_playwright().start()
     launch_kwargs = {
         "user_data_dir": str(PROFILE_DIR),
         "headless": False,
@@ -221,13 +224,13 @@ def open_chat_page(config: Dict[str, Any]):
     preferred_channel = str(config.get("browser_channel", "msedge")).strip()
     if preferred_channel:
         try:
-            context = p.chromium.launch_persistent_context(channel=preferred_channel, **launch_kwargs)
+            context = await p.chromium.launch_persistent_context(channel=preferred_channel, **launch_kwargs)
         except Exception:
-            context = p.chromium.launch_persistent_context(**launch_kwargs)
+            context = await p.chromium.launch_persistent_context(**launch_kwargs)
     else:
-        context = p.chromium.launch_persistent_context(**launch_kwargs)
-    page = context.pages[0] if context.pages else context.new_page()
-    page.goto(
+        context = await p.chromium.launch_persistent_context(**launch_kwargs)
+    page = context.pages[0] if context.pages else await context.new_page()
+    await page.goto(
         config["target_url"],
         wait_until="domcontentloaded",
         timeout=int(config["navigation_timeout_seconds"]) * 1000,
@@ -235,79 +238,81 @@ def open_chat_page(config: Dict[str, Any]):
     return p, context, page
 
 
-def first_login(config: Dict[str, Any]) -> None:
+async def first_login(config: Dict[str, Any]) -> None:
     print("\nOpening browser for first login...")
-    p, context, page = open_chat_page(config)
+    p, context, page = await open_chat_page(config)
     try:
         print("Please finish login in the browser.")
         input("After login and seeing chat input, press Enter here...")
-        locator = get_first_visible_locator(page, config["input_selectors"], timeout_ms=2500)
+        locator = await get_first_visible_locator(page, config["input_selectors"], timeout_ms=2500)
         if locator is None:
             print("Login check warning: chat input not found yet. You can continue and test with a task.")
         else:
             print("Login check passed. Session should be saved.")
     finally:
-        context.close()
-        p.stop()
+        await context.close()
+        await p.stop()
 
 
-def send_once(config: Dict[str, Any], prompt: str) -> str:
-    p, context, page = open_chat_page(config)
+async def send_once(config: Dict[str, Any], prompt: str):
+    p, context, page = await open_chat_page(config)
     try:
-        input_box = get_first_visible_locator(page, config["input_selectors"], timeout_ms=4000)
+        input_box = await get_first_visible_locator(page, config["input_selectors"], timeout_ms=4000)
         if input_box is None:
             raise RuntimeError("Chat input not found. You may need to login again or update selectors.")
 
-        input_box.fill(prompt)
+        await input_box.fill(prompt)
 
         if config.get("confirm_before_send", True):
             if not ask_bool("Ready to send this prompt?", default=True):
                 raise RuntimeError("Canceled by user before send.")
 
         if config.get("send_mode") == "button":
-            send_btn = get_first_visible_locator(page, config["send_button_selectors"], timeout_ms=1200)
+            send_btn = await get_first_visible_locator(page, config["send_button_selectors"], timeout_ms=1200)
             if send_btn is not None:
-                send_btn.click()
+                await send_btn.click()
             else:
-                input_box.press("Enter")
+                await input_box.press("Enter")
         else:
-            input_box.press("Enter")
+            await input_box.press("Enter")
 
-        response = wait_for_response(
+        async for chunk in wait_for_response(
             page,
             selectors=config["assistant_selectors"],
             timeout_seconds=int(config["response_timeout_seconds"]),
             stable_seconds=int(config["stable_response_seconds"]),
-        )
-        return response
+        ):
+            yield chunk
     except Exception as exc:
         debug_path = save_error_snapshot(page, exc)
         raise RuntimeError(f"Task failed. Debug file: {debug_path}") from exc
     finally:
-        context.close()
-        p.stop()
+        await context.close()
+        await p.stop()
 
 
-def send_with_retry(config: Dict[str, Any], prompt: str) -> str:
+async def send_with_retry(config: Dict[str, Any], prompt: str):
     retries = max(1, int(config.get("max_retries", 3)))
     backoff = float(config.get("backoff_seconds", 1.5))
     last_error: Optional[Exception] = None
 
     for attempt in range(1, retries + 1):
         try:
-            return send_once(config, prompt)
+            async for chunk in send_once(config, prompt):
+                yield chunk
+            return
         except Exception as exc:
             last_error = exc
             print(f"Attempt {attempt}/{retries} failed: {exc}")
             if attempt < retries:
                 wait_s = backoff * (2 ** (attempt - 1))
                 print(f"Retrying in {wait_s:.1f}s...")
-                time.sleep(wait_s)
+                await asyncio.sleep(wait_s)
 
     raise RuntimeError(str(last_error) if last_error else "Unknown error")
 
 
-def run_task(config: Dict[str, Any]) -> None:
+async def run_task(config: Dict[str, Any]) -> None:
     keys = list(TEMPLATES.keys()) + ["custom"]
     idx = choose_from_list("Select task template", keys)
     template_key = keys[idx]
@@ -323,11 +328,13 @@ def run_task(config: Dict[str, Any]) -> None:
     print("-" * 70)
 
     started = time.time()
-    response = send_with_retry(config, final_prompt)
-    elapsed = time.time() - started
-
     print("\nResponse:\n")
-    print(response)
+    response = ""
+    async for chunk in send_with_retry(config, final_prompt):
+        print(chunk[len(response):], end="", flush=True)
+        response = chunk
+    print()
+    elapsed = time.time() - started
 
     append_history(
         {
@@ -392,7 +399,7 @@ def edit_config(config: Dict[str, Any]) -> Dict[str, Any]:
             print("Invalid choice.")
 
 
-def quick_setup(config: Dict[str, Any]) -> Dict[str, Any]:
+async def quick_setup(config: Dict[str, Any]) -> Dict[str, Any]:
     print("\nQuick setup")
     print("Step 1/3: target page")
     if ask_bool("Use default target URL (https://chat.deepseek.com/)?", default=True):
@@ -403,12 +410,14 @@ def quick_setup(config: Dict[str, Any]) -> Dict[str, Any]:
             config["target_url"] = raw
 
     print("Step 2/3: login")
-    first_login(config)
+    await first_login(config)
 
     print("Step 3/3: run smoke test")
     smoke_prompt = "Reply with exactly: READY"
     try:
-        result = send_with_retry(config, smoke_prompt)
+        result = ""
+        async for chunk in send_with_retry(config, smoke_prompt):
+            result = chunk
         print(f"Smoke result: {result[:120]}")
     except Exception as exc:
         print(f"Smoke test failed: {exc}")
@@ -417,7 +426,7 @@ def quick_setup(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
-def main() -> None:
+async def async_main() -> None:
     ensure_state()
     config = load_config()
 
@@ -434,11 +443,11 @@ def main() -> None:
         choice = input("Choose: ").strip()
         try:
             if choice == "1":
-                config = quick_setup(config)
+                config = await quick_setup(config)
             elif choice == "2":
-                first_login(config)
+                await first_login(config)
             elif choice == "3":
-                run_task(config)
+                await run_task(config)
             elif choice == "4":
                 show_history()
             elif choice == "5":
@@ -453,6 +462,9 @@ def main() -> None:
         except Exception as exc:
             print(f"Error: {exc}")
 
+
+def main():
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
     try:

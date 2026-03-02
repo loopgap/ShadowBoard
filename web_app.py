@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import json
 import socket
-import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
@@ -12,7 +11,13 @@ import gradio as gr
 
 import main as core
 
-LOGIN_LOCK = threading.Lock()
+import asyncio
+_LOGIN_LOCK = None
+def get_login_lock():
+    global _LOGIN_LOCK
+    if _LOGIN_LOCK is None:
+        _LOGIN_LOCK = asyncio.Lock()
+    return _LOGIN_LOCK
 LOGIN_STATE: Dict[str, Any] = {"p": None, "context": None, "page": None}
 LAST_INPUT: Dict[str, str] = {"template": "摘要总结", "content": ""}
 
@@ -703,34 +708,34 @@ def _save_config_from_form(
     return "配置已保存", _build_guide_markdown(), _provider_guide_text(provider_label)
 
 
-def _close_login_session() -> None:
-    with LOGIN_LOCK:
+async def _close_login_session() -> None:
+    async with get_login_lock():
         ctx = LOGIN_STATE.get("context")
         p = LOGIN_STATE.get("p")
         if ctx is not None:
             try:
-                ctx.close()
+                await ctx.close()
             except Exception:
                 pass
         if p is not None:
             try:
-                p.stop()
+                await p.stop()
             except Exception:
                 pass
         LOGIN_STATE.update({"p": None, "context": None, "page": None})
 
 
-def _open_login_browser() -> Tuple[str, str]:
+async def _open_login_browser() -> Tuple[str, str]:
     cfg = core.load_config()
     try:
-        with LOGIN_LOCK:
+        async with get_login_lock():
             if LOGIN_STATE.get("context") is not None:
                 return "登录浏览器已打开 请在该窗口完成登录", _build_guide_markdown()
-            p, context, page = core.open_chat_page(cfg)
+            p, context, page = await core.open_chat_page(cfg)
             LOGIN_STATE.update({"p": p, "context": context, "page": page})
         return "已打开登录浏览器 请登录后回到本页面点击 登录完成检查", _build_guide_markdown()
     except Exception as exc:
-        _close_login_session()
+        await _close_login_session()
         return (
             "打开浏览器失败 请先执行 .venv\\Scripts\\python.exe -m playwright install chromium 然后重试 错误 "
             f"{exc}",
@@ -738,21 +743,21 @@ def _open_login_browser() -> Tuple[str, str]:
         )
 
 
-def _finish_login_check() -> Tuple[str, str]:
-    with LOGIN_LOCK:
+async def _finish_login_check() -> Tuple[str, str]:
+    async with get_login_lock():
         page = LOGIN_STATE.get("page")
         if page is None:
             return "未检测到登录会话 请先点击 打开登录浏览器", _build_guide_markdown()
 
     cfg = core.load_config()
-    ok = core.get_first_visible_locator(page, cfg["input_selectors"], timeout_ms=3500) is not None
-    _close_login_session()
+    ok = await core.get_first_visible_locator(page, cfg["input_selectors"], timeout_ms=3500) is not None
+    await _close_login_session()
     if ok:
         return "登录检查通过 会话已持久化保存", _build_guide_markdown()
     return "未检测到聊天输入框 请重新打开登录浏览器确认页面状态", _build_guide_markdown()
 
 
-def _run_smoke_test(smoke_confirm: bool, smoke_pause_seconds: int) -> Tuple[str, str]:
+async def _run_smoke_test(smoke_confirm: bool, smoke_pause_seconds: int) -> Tuple[str, str]:
     if not smoke_confirm:
         return "请先勾选冒烟测试确认后再执行", _build_guide_markdown()
     cfg = core.load_config()
@@ -764,9 +769,12 @@ def _run_smoke_test(smoke_confirm: bool, smoke_pause_seconds: int) -> Tuple[str,
     try:
         pause_seconds = max(0, int(run_cfg.get("smoke_pause_seconds", 3)))
         if pause_seconds > 0:
-            time.sleep(pause_seconds)
+            import asyncio
+            await asyncio.sleep(pause_seconds)
 
-        result = core.send_with_retry(run_cfg, "Reply with exactly: READY")
+        result = ""
+        async for chunk in core.send_with_retry(run_cfg, "Reply with exactly: READY"):
+            result = chunk
         elapsed = round(time.time() - started, 2)
         core.append_history(
             {
@@ -795,23 +803,25 @@ def _run_smoke_test(smoke_confirm: bool, smoke_pause_seconds: int) -> Tuple[str,
         return f"冒烟测试失败 用时 {elapsed} 秒 错误 {exc}", _build_guide_markdown()
 
 
-def _one_click_prepare() -> Tuple[str, str]:
-    msg, guide = _open_login_browser()
+async def _one_click_prepare() -> Tuple[str, str]:
+    msg, guide = await _open_login_browser()
     tip = "已执行自动准备 下一步请在新浏览器中登录 然后点击 登录完成检查 和 执行冒烟测试"
     return f"{tip}\n{msg}", guide
 
 
-def _run_task(template_label: str, user_input: str, confirmed: bool) -> Tuple[str, str, str, str, List[List[Any]]]:
+async def _run_task(template_label: str, user_input: str, confirmed: bool):
     raw_input = (user_input or "").strip()
     if not raw_input:
-        return "任务已取消 输入为空", "", "", "输入提示 请先填写任务内容", _history_table("全部")
+        yield "任务已取消 输入为空", "", "", "输入提示 请先填写任务内容", _history_table("全部")
+        return
 
     LAST_INPUT["template"] = template_label
     LAST_INPUT["content"] = raw_input
 
     cfg = core.load_config()
     if cfg.get("confirm_before_send", True) and not confirmed:
-        return "请先勾选 我确认发送 后再执行", "", "", _input_tip(raw_input), _history_table("全部")
+        yield "请先勾选 我确认发送 后再执行", "", "", _input_tip(raw_input), _history_table("全部")
+        return
 
     template_key = TEMPLATE_LABEL_TO_KEY.get(template_label, "custom")
     prompt = core.build_prompt(template_key, raw_input)
@@ -819,8 +829,13 @@ def _run_task(template_label: str, user_input: str, confirmed: bool) -> Tuple[st
     run_cfg["confirm_before_send"] = False
 
     started = time.time()
+    response = ""
     try:
-        response = core.send_with_retry(run_cfg, prompt)
+        async for chunk in core.send_with_retry(run_cfg, prompt):
+            response = chunk
+            elapsed = round(time.time() - started, 2)
+            yield f"执行中... 用时 {elapsed} 秒，收到 {len(response)} 字", prompt[:3000], response, _input_tip(raw_input), _history_table("全部")
+            
         elapsed = round(time.time() - started, 2)
         core.append_history(
             {
@@ -833,7 +848,7 @@ def _run_task(template_label: str, user_input: str, confirmed: bool) -> Tuple[st
             }
         )
         status = f"执行成功 用时 {elapsed} 秒 返回 {len(response)} 字"
-        return status, prompt[:3000], response, _input_tip(raw_input), _history_table("全部")
+        yield status, prompt[:3000], response, _input_tip(raw_input), _history_table("全部")
     except Exception as exc:
         elapsed = round(time.time() - started, 2)
         core.append_history(
@@ -841,13 +856,13 @@ def _run_task(template_label: str, user_input: str, confirmed: bool) -> Tuple[st
                 "time": datetime.now().isoformat(timespec="seconds"),
                 "template": template_key,
                 "input_chars": len(raw_input),
-                "response_chars": 0,
+                "response_chars": len(response),
                 "duration_seconds": elapsed,
                 "ok": False,
                 "error": str(exc),
             }
         )
-        return f"执行失败 用时 {elapsed} 秒 错误 {exc}", prompt[:3000], "", _input_tip(raw_input), _history_table("全部")
+        yield f"执行失败 用时 {elapsed} 秒 错误 {exc}", prompt[:3000], response, _input_tip(raw_input), _history_table("全部")
 
 
 def _reuse_last_input() -> Tuple[str, str]:
