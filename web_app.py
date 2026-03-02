@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import socket
@@ -11,7 +12,30 @@ import gradio as gr
 
 import main as core
 
-import asyncio
+
+# Task Queue System
+from dataclasses import dataclass, field
+import uuid
+
+@dataclass
+class QueueItem:
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    template_label: str = ""
+    user_input: str = ""
+    status: str = "等待中"
+    result: str = ""
+    added_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+TASK_QUEUE: List[QueueItem] = []
+_QUEUE_LOCK = None
+
+def get_queue_lock():
+    global _QUEUE_LOCK
+    if _QUEUE_LOCK is None:
+        _QUEUE_LOCK = asyncio.Lock()
+    return _QUEUE_LOCK
+
+
 _LOGIN_LOCK = None
 def get_login_lock():
     global _LOGIN_LOCK
@@ -769,7 +793,6 @@ async def _run_smoke_test(smoke_confirm: bool, smoke_pause_seconds: int) -> Tupl
     try:
         pause_seconds = max(0, int(run_cfg.get("smoke_pause_seconds", 3)))
         if pause_seconds > 0:
-            import asyncio
             await asyncio.sleep(pause_seconds)
 
         result = ""
@@ -882,6 +905,65 @@ def _export_response(response: str) -> Tuple[str, str]:
     md.write_text(f"# 执行结果\n\n{text}\n", encoding="utf-8")
     return str(txt), f"导出完成 文件 {txt.name} 和 {md.name}"
 
+
+
+async def _add_to_queue(template_label: str, user_input: str) -> str:
+    raw_input = (user_input or "").strip()
+    if not raw_input:
+        return "提示: 任务内容为空，未加入队列"
+    async with get_queue_lock():
+        item = QueueItem(template_label=template_label, user_input=raw_input)
+        TASK_QUEUE.append(item)
+    return f"已成功加入队列 (ID: {item.id})，当前队列长度: {len(TASK_QUEUE)}"
+
+def _render_queue_table() -> List[List[Any]]:
+    return [[item.id, item.added_at, item.template_label, item.user_input[:20], item.status, item.result[:30]] for item in TASK_QUEUE]
+
+async def _process_queue_once():
+    async with get_queue_lock():
+        pending = [item for item in TASK_QUEUE if item.status == "等待中"]
+        if not pending:
+            return "队列中没有等待执行的任务", _render_queue_table()
+        target = pending[0]
+        target.status = "执行中"
+    
+    cfg = core.load_config()
+    run_cfg = copy.deepcopy(cfg)
+    run_cfg["confirm_before_send"] = False
+    template_key = TEMPLATE_LABEL_TO_KEY.get(target.template_label, "custom")
+    prompt = core.build_prompt(template_key, target.user_input)
+
+    started = time.time()
+    response = ""
+    try:
+        async for chunk in core.send_with_retry(run_cfg, prompt):
+            response = chunk
+            target.result = f"收到 {len(response)} 字..."
+        target.status = "执行成功"
+        target.result = response
+        ok = True
+    except Exception as exc:
+        target.status = "执行失败"
+        target.result = str(exc)
+        ok = False
+        
+    elapsed = round(time.time() - started, 2)
+    core.append_history(
+        {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "template": template_key,
+            "input_chars": len(target.user_input),
+            "response_chars": len(response),
+            "duration_seconds": elapsed,
+            "ok": ok,
+        }
+    )
+    return f"任务 {target.id} 已处理完毕 ({target.status})", _render_queue_table()
+
+async def _clear_queue():
+    async with get_queue_lock():
+        TASK_QUEUE.clear()
+    return "队列已清空", _render_queue_table()
 
 def build_ui() -> gr.Blocks:
     provider_labels = [v["label"] for v in PROVIDERS.values()]
@@ -1001,6 +1083,30 @@ def build_ui() -> gr.Blocks:
 
                 diag_box = gr.Textbox(label="诊断输出", lines=14)
 
+
+        with gr.Tab("批量队列"):
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>添加任务到队列</div>")
+                q_template = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="摘要总结", label="任务模板")
+                q_input = gr.Textbox(label="任务输入", lines=3)
+                q_add_btn = gr.Button("加入队列", elem_classes=["action-secondary"])
+                q_add_status = gr.Textbox(label="添加状态", lines=1)
+                
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>队列展示与执行</div>")
+                with gr.Row():
+                    q_refresh_btn = gr.Button("刷新队列", elem_classes=["action-secondary"])
+                    q_clear_btn = gr.Button("清空队列", elem_classes=["action-secondary"])
+                    q_run_btn = gr.Button("执行队列首个任务", elem_classes=["action-primary"])
+                
+                q_run_status = gr.Textbox(label="执行状态", lines=1)
+                q_grid = gr.Dataframe(
+                    headers=["ID", "添加时间", "模板", "内容预览", "状态", "结果摘要"],
+                    datatype=["str", "str", "str", "str", "str", "str"],
+                    row_count=10,
+                    interactive=False,
+                )
+
         with gr.Tab("帮助文档"):
             with gr.Group(elem_classes=["section-card"]):
                 gr.Markdown("<div class='section-title'>接口文档与使用指引</div>")
@@ -1045,6 +1151,13 @@ def build_ui() -> gr.Blocks:
         clear_history_btn.click(fn=_clear_history, outputs=[diag_box, history_grid])
         health_btn.click(fn=_health_check, outputs=[diag_box])
         error_btn.click(fn=_latest_errors, outputs=[diag_box])
+
+
+        q_add_btn.click(fn=_add_to_queue, inputs=[q_template, q_input], outputs=[q_add_status])
+        q_refresh_btn.click(fn=_render_queue_table, outputs=[q_grid])
+        q_clear_btn.click(fn=_clear_queue, outputs=[q_run_status, q_grid])
+        q_run_btn.click(fn=_process_queue_once, outputs=[q_run_status, q_grid])
+        demo.load(fn=_render_queue_table, outputs=[q_grid])
 
         refresh_doc_btn.click(fn=_build_api_doc_text, outputs=[api_doc_box])
         export_doc_btn.click(fn=_export_api_doc, outputs=[api_doc_file, api_doc_status])
