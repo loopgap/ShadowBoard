@@ -137,9 +137,14 @@ def _provider_guide_text(provider_label: str) -> str:
 
 def _build_api_doc_text() -> str:
     lines = [
-        "网页 AI 半自动助手 接口文档",
+        "Chorus-WebAI | 网页 AI 协同引擎 接口文档",
         "",
-        "功能事件列表",
+        "--- 核心架构特性 ---",
+        "1. 多模型接力 (Relay)：支持使用 {prev_result} 引用前序任务输出",
+        "2. 语义锚点 (Anchor)：内置 A11y 降级定位策略，增强对 UI 改版的抗性",
+        "3. 视觉证据链 (Evidence)：自动记录错误现场快照与黑匣子日志",
+        "",
+        "--- 功能事件列表 ---",
         "1 应用平台预设 事件 应用平台预设",
         "2 保存参数 事件 保存参数",
         "3 打开登录浏览器 事件 打开登录浏览器",
