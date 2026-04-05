@@ -1,3 +1,14 @@
+"""
+网页 AI 半自动助手 - Gradio 图形界面模块 (Web UI Layer)
+
+本模块构建了一个基于 Gradio 的交互式 Web 界面，提供以下功能:
+1. 平台预设管理与参数配置
+2. 引导式登录与冒烟测试流程
+3. 单次任务执行与结果实时预览
+4. 批量任务队列 (Task Queue) 系统
+5. 历史记录审计、健康检查与接口文档导出
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,23 +17,25 @@ import json
 import socket
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, TYPE_CHECKING
 
-import gradio as gr
+if TYPE_CHECKING:
+    import gradio as gr
 
 import main as core
 
 
-# Task Queue System
+# --- Task Queue System (批量任务队列系统) ---
 from dataclasses import dataclass, field
 import uuid
 
 @dataclass
 class QueueItem:
+    """表示队列中的单个任务项"""
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     template_label: str = ""
     user_input: str = ""
-    status: str = "等待中"
+    status: str = "等待中"  # 等待中 / 执行中 / 执行成功 / 执行失败
     result: str = ""
     added_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -30,14 +43,16 @@ TASK_QUEUE: List[QueueItem] = []
 _QUEUE_LOCK = None
 
 def get_queue_lock():
+    """获取队列操作的异步锁，确保线程/并发安全"""
     global _QUEUE_LOCK
     if _QUEUE_LOCK is None:
         _QUEUE_LOCK = asyncio.Lock()
     return _QUEUE_LOCK
-
+# ------------------------------------------
 
 _LOGIN_LOCK = None
 def get_login_lock():
+    """获取浏览器登录会话的锁，防止同时打开多个登录窗口"""
     global _LOGIN_LOCK
     if _LOGIN_LOCK is None:
         _LOGIN_LOCK = asyncio.Lock()
@@ -48,74 +63,41 @@ LAST_INPUT: Dict[str, str] = {"template": "摘要总结", "content": ""}
 EXPORT_DIR = core.STATE_DIR / "exports"
 DOCS_DIR = core.STATE_DIR / "docs"
 
-PROVIDERS: Dict[str, Dict[str, str]] = {
-    "deepseek": {
-        "label": "DeepSeek 网页",
-        "url": "https://chat.deepseek.com/",
-        "send_mode": "enter",
-        "guide": "推荐新手首选 页面稳定 先登录后做冒烟测试",
-    },
-    "kimi": {
-        "label": "Kimi 网页",
-        "url": "https://kimi.moonshot.cn/",
-        "send_mode": "enter",
-        "guide": "适合长文处理 登录后先执行一次冒烟验证",
-    },
-    "tongyi": {
-        "label": "通义千问 网页",
-        "url": "https://tongyi.aliyun.com/qianwen/",
-        "send_mode": "button",
-        "guide": "建议使用点击按钮发送 遇到弹窗先手动关闭",
-    },
-    "doubao": {
-        "label": "豆包 网页",
-        "url": "https://www.doubao.com/chat/",
-        "send_mode": "enter",
-        "guide": "登录后建议先做冒烟测试 再开始批量任务",
-    },
-    "zhipu": {
-        "label": "智谱清言 网页",
-        "url": "https://chatglm.cn/main/alltoolsdetail",
-        "send_mode": "button",
-        "guide": "建议点击按钮发送 页面改版时优先检查输入框定位",
-    },
-    "wenxin": {
-        "label": "文心一言 网页",
-        "url": "https://yiyan.baidu.com/",
-        "send_mode": "button",
-        "guide": "登录验证较严格 建议先人工完成验证后再自动执行",
-    },
-}
+PROVIDERS: Dict[str, Dict[str, str]] = {}
+PROVIDER_LABEL_TO_KEY: Dict[str, str] = {}
+TEMPLATE_LABEL_TO_KEY: Dict[str, str] = {}
+KEY_TO_TEMPLATE_LABEL: Dict[str, str] = {}
+TEMPLATE_GUIDE: Dict[str, str] = {}
+CUSTOM_CSS: str = ""
 
-PROVIDER_LABEL_TO_KEY = {v["label"]: k for k, v in PROVIDERS.items()}
+def _load_metadata():
+    """从外部 JSON 和 CSS 文件加载元数据"""
+    global PROVIDERS, PROVIDER_LABEL_TO_KEY, TEMPLATE_LABEL_TO_KEY, KEY_TO_TEMPLATE_LABEL, TEMPLATE_GUIDE, CUSTOM_CSS
+    
+    # 加载 Providers 和 Templates
+    meta_path = core.STATE_DIR / "providers.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            PROVIDERS = meta.get("providers", {})
+            templates = meta.get("templates", {})
+            
+            PROVIDER_LABEL_TO_KEY = {v["label"]: k for k, v in PROVIDERS.items()}
+            TEMPLATE_LABEL_TO_KEY = {k: v["key"] for k, v in templates.items()}
+            KEY_TO_TEMPLATE_LABEL = {v["key"]: k for k, v in templates.items()}
+            KEY_TO_TEMPLATE_LABEL["smoke"] = "冒烟测试"
+            TEMPLATE_GUIDE = {k: v["guide"] for k, v in templates.items()}
+        except Exception as e:
+            print(f"Error loading providers.json: {e}")
 
-TEMPLATE_LABEL_TO_KEY: Dict[str, str] = {
-    "摘要总结": "summary",
-    "中英翻译": "translation",
-    "润色改写": "rewrite",
-    "信息抽取": "extract",
-    "问答助手": "qa",
-    "自定义原样发送": "custom",
-}
+    # 加载 CSS
+    css_path = core.STATE_DIR / "style.css"
+    if css_path.exists():
+        CUSTOM_CSS = css_path.read_text(encoding="utf-8")
+    else:
+        CUSTOM_CSS = ""
 
-KEY_TO_TEMPLATE_LABEL: Dict[str, str] = {
-    "summary": "摘要总结",
-    "translation": "中英翻译",
-    "rewrite": "润色改写",
-    "extract": "信息抽取",
-    "qa": "问答助手",
-    "custom": "自定义原样发送",
-    "smoke": "冒烟测试",
-}
-
-TEMPLATE_GUIDE: Dict[str, str] = {
-    "摘要总结": "适合长文快速提炼要点 默认输出结构化结论",
-    "中英翻译": "输入任意语言文本 自动翻译并尽量保留语气",
-    "润色改写": "适合邮件 汇报 简历语句优化",
-    "信息抽取": "自动提取人名 日期 行动项 截止时间",
-    "问答助手": "输入问题后给出简洁可执行步骤",
-    "自定义原样发送": "不会套模板 直接把输入内容发送给网页 AI",
-}
+_load_metadata()
 
 EXAMPLE_INPUTS: List[List[str]] = [
     ["摘要总结", "请总结下面会议纪要并输出三条结论和三条行动项\n本周完成接口联调\n下周开始灰度发布\n风险是测试资源不足"],
@@ -125,376 +107,6 @@ EXAMPLE_INPUTS: List[List[str]] = [
 ]
 
 HISTORY_FILTERS = ["全部", "仅成功", "仅失败"]
-
-CUSTOM_CSS = """
-:root { color-scheme: light; }
-footer, #footer, .gradio-container .footer, [data-testid='footer'] { display: none !important; }
-
-.gradio-container {
-  --app-surface: #ffffff;
-  --app-surface-muted: #f5f7fb;
-  --app-text: #111827;
-  --app-border: #dbe2ee;
-  --body-background-fill: #f5f7fb;
-  --block-background-fill: #ffffff;
-  --block-border-color: #dbe2ee;
-  --block-label-text-color: #111827;
-  --body-text-color: #111827;
-  --body-text-color-subdued: #4b5563;
-  --input-background-fill: #ffffff;
-  --input-border-color: #cbd5e1;
-  --input-placeholder-color: #6b7280;
-  --color-accent: #1a73e8;
-  --color-accent-soft: #e8f0fe;
-  font-family: "Google Sans", "HarmonyOS Sans SC", "MiSans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  background:
-    radial-gradient(1000px 300px at 8% -8%, #e8f0fe 0%, rgba(232,240,254,0) 65%),
-    radial-gradient(800px 260px at 92% -18%, #f3f8ff 0%, rgba(243,248,255,0) 65%),
-    #f7f9fc;
-  color: #111827;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  font-size: 15px;
-  line-height: 1.65;
-}
-
-.hero {
-  border: 1px solid #d2e3fc;
-  border-radius: 22px;
-  background: #ffffff;
-  padding: 22px;
-  margin-bottom: 14px;
-  box-shadow: 0 10px 28px rgba(26,115,232,0.08);
-}
-.hero-title { font-size: 34px; font-weight: 800; color: #202124; margin-bottom: 8px; }
-.hero-sub { font-size: 16px; color: #4b5563; margin-bottom: 12px; }
-.hero-chips { display: flex; gap: 8px; flex-wrap: wrap; }
-.hero-chip {
-  display: inline-block;
-  border: 1px solid #d2e3fc;
-  border-radius: 999px;
-  padding: 6px 12px;
-  background: #eef4ff;
-  color: #174ea6;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.section-card {
-  border: 1px solid var(--app-border);
-  border-radius: 18px;
-  background: var(--app-surface);
-  box-shadow: 0 4px 14px rgba(60,64,67,0.07);
-  padding: 14px;
-  margin-top: 8px;
-}
-
-.section-card,
-.section-card * {
-  color: #111827 !important;
-}
-
-.section-card .prose,
-.section-card .prose * {
-  background: transparent !important;
-}
-
-.section-title {
-  font-size: 18px;
-  font-weight: 700;
-  color: #202124;
-  margin-bottom: 10px;
-}
-
-.gradio-container .tabs {
-  background: transparent !important;
-}
-
-.gradio-container .tabs button {
-  color: #374151 !important;
-  font-weight: 600 !important;
-  border-bottom: 2px solid transparent !important;
-  background: #f5f7fb !important;
-  border-radius: 10px 10px 0 0 !important;
-}
-
-.gradio-container .tabs button:hover {
-  color: #174ea6 !important;
-  background: #eef4ff !important;
-}
-
-.gradio-container .tabs button[aria-selected='true'] {
-  color: #174ea6 !important;
-  font-weight: 700 !important;
-  border-bottom: 2px solid #1a73e8 !important;
-  background: #ffffff !important;
-  box-shadow: inset 0 -1px 0 #1a73e8 !important;
-}
-
-.gradio-container textarea,
-.gradio-container input,
-.gradio-container .wrap,
-.gradio-container .block {
-  color: #202124 !important;
-}
-
-.gradio-container textarea,
-.gradio-container input {
-  background: #ffffff !important;
-  border: 1px solid #cbd5e1 !important;
-  border-radius: 10px !important;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04) !important;
-}
-
-.gradio-container .prose,
-.gradio-container .prose * {
-  color: #202124 !important;
-}
-
-.gradio-container .prose h1,
-.gradio-container .prose h2,
-.gradio-container .prose h3,
-.gradio-container .prose h4 {
-  color: #1f1f1f !important;
-}
-
-.gradio-container .prose p,
-.gradio-container .prose li,
-.gradio-container .prose strong {
-  color: #111827 !important;
-  line-height: 1.75 !important;
-  font-size: 15px !important;
-}
-
-.gradio-container .prose code,
-.gradio-container .prose pre {
-  background: #f6f8fc !important;
-  color: #1f1f1f !important;
-  border: 1px solid #e3e8f0 !important;
-}
-
-.gradio-container [class*='markdown'],
-.gradio-container [class*='markdown'] > div {
-  background: #ffffff !important;
-  border-radius: 10px !important;
-}
-
-.action-primary button {
-  background: #1a73e8 !important;
-  border-color: #1a73e8 !important;
-  color: #ffffff !important;
-  font-weight: 700 !important;
-}
-.action-primary button:hover { background: #1967d2 !important; }
-
-.action-secondary button {
-  background: #ffffff !important;
-  border-color: #d2e3fc !important;
-  color: #174ea6 !important;
-  font-weight: 700 !important;
-}
-
-.provider-card textarea,
-.provider-card input {
-  background: #f7faff !important;
-}
-
-.cn-quick-actions {
-  margin-top: 16px;
-  margin-bottom: 8px;
-  border: 1px solid #d2e3fc;
-  border-radius: 16px;
-  padding: 14px;
-  background: #eef4ff;
-}
-.cn-quick-title { font-size: 18px; font-weight: 700; color: #174ea6; margin-bottom: 10px; }
-.cn-quick-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.cn-quick-btn {
-  display: block;
-  text-align: center;
-  text-decoration: none !important;
-  font-size: 15px;
-  font-weight: 700;
-  color: #ffffff !important;
-  padding: 12px 10px;
-  border-radius: 10px;
-  border: 1px solid #1a73e8;
-  background: #1a73e8;
-}
-.cn-quick-btn:hover { background: #1967d2; }
-.cn-quick-tip { margin-top: 10px; color: #3c4043; font-size: 13px; }
-
-.gradio-container label,
-.gradio-container .label-wrap,
-.gradio-container .svelte-1ipelgc {
-  color: #111827 !important;
-}
-
-/* History table readability in light mode */
-#history-table,
-#history-table > div,
-#history-table .table-container,
-#history-table [data-testid='dataframe'],
-#history-table [data-testid='dataframe'] * {
-  background: var(--app-surface) !important;
-  color: var(--app-text) !important;
-  border-color: var(--app-border) !important;
-}
-
-#history-table table,
-#history-table thead,
-#history-table tbody,
-#history-table tr,
-#history-table th,
-#history-table td {
-  background: #ffffff !important;
-  color: #111827 !important;
-  border-color: #dbe2ee !important;
-}
-
-#history-table th {
-  font-weight: 700 !important;
-}
-
-#history-table .table-wrap,
-#history-table .table-wrap * {
-  color: #111827 !important;
-  border-color: #dbe2ee !important;
-}
-
-#history-table [role='grid'],
-#history-table [role='row'],
-#history-table [role='gridcell'],
-#history-table [role='columnheader'] {
-  background: var(--app-surface) !important;
-  color: var(--app-text) !important;
-}
-
-#history-table td *,
-#history-table th * {
-  color: var(--app-text) !important;
-  background: transparent !important;
-}
-
-#history-filter,
-#history-filter * {
-  color: #111827 !important;
-}
-
-@media (max-width: 900px) {
-  .hero-title { font-size: 26px; }
-  .cn-quick-grid { grid-template-columns: 1fr; }
-}
-
-@media (prefers-color-scheme: dark) {
-  :root { color-scheme: dark; }
-  .gradio-container {
-    --app-surface: #111827;
-    --app-surface-muted: #0b1220;
-    --app-text: #e5e7eb;
-    --app-border: #334155;
-    --body-background-fill: #0f172a;
-    --block-background-fill: #111827;
-    --body-text-color: #e5e7eb;
-    --body-text-color-subdued: #9ca3af;
-    --input-background-fill: #0b1220;
-    --input-border-color: #334155;
-    --block-border-color: #334155;
-    background:
-      radial-gradient(1000px 300px at 8% -8%, #1e3a8a 0%, rgba(30,58,138,0) 65%),
-      radial-gradient(800px 260px at 92% -18%, #1f2937 0%, rgba(31,41,55,0) 65%),
-      #0b1220 !important;
-    color: #e5e7eb !important;
-  }
-
-  .hero,
-  .section-card,
-  .cn-quick-actions {
-    background: #111827 !important;
-    border-color: #334155 !important;
-    color: #e5e7eb !important;
-  }
-
-  .hero-title,
-  .section-title,
-  .gradio-container .prose,
-  .gradio-container .prose *,
-  .section-card,
-  .section-card * {
-    color: #e5e7eb !important;
-  }
-
-  .hero-sub,
-  .cn-quick-tip {
-    color: #cbd5e1 !important;
-  }
-
-  .gradio-container [class*='markdown'],
-  .gradio-container [class*='markdown'] > div {
-    background: #111827 !important;
-    color: #e5e7eb !important;
-  }
-
-  .action-secondary button {
-    background: #0b1220 !important;
-    color: #93c5fd !important;
-    border-color: #334155 !important;
-  }
-
-  .gradio-container textarea,
-  .gradio-container input {
-    background: #0b1220 !important;
-    color: #e5e7eb !important;
-    border-color: #334155 !important;
-  }
-
-  .gradio-container .tabs button {
-    background: #0b1220 !important;
-    color: #cbd5e1 !important;
-  }
-
-  .gradio-container .tabs button[aria-selected='true'] {
-    background: #111827 !important;
-    color: #93c5fd !important;
-    border-bottom-color: #60a5fa !important;
-  }
-
-  /* History table readability in dark mode */
-  #history-table table,
-  #history-table thead,
-  #history-table tbody,
-  #history-table tr,
-  #history-table th,
-  #history-table td {
-    background: #0b1220 !important;
-    color: #e5e7eb !important;
-    border-color: #334155 !important;
-  }
-
-  #history-table .table-wrap,
-  #history-table .table-wrap *,
-  #history-table [role='grid'],
-  #history-table [role='row'],
-  #history-table [role='gridcell'],
-  #history-table [role='columnheader'] {
-    background: #0b1220 !important;
-    color: #e5e7eb !important;
-    border-color: #334155 !important;
-  }
-
-  #history-table td *,
-  #history-table th * {
-    color: #e5e7eb !important;
-    background: transparent !important;
-  }
-
-  #history-filter,
-  #history-filter * {
-    color: #e5e7eb !important;
-  }
-}
-"""
 
 
 def _ensure_dirs() -> None:
@@ -924,14 +536,26 @@ async def _process_queue_once():
         pending = [item for item in TASK_QUEUE if item.status == "等待中"]
         if not pending:
             return "队列中没有等待执行的任务", _render_queue_table()
-        target = pending[0]
+        
+        # 获取当前任务及其索引
+        current_idx = TASK_QUEUE.index(pending[0])
+        target = TASK_QUEUE[current_idx]
+        
+        # 提取前序任务结果 (如果有的话)
+        prev_result = ""
+        if current_idx > 0:
+            prev_result = TASK_QUEUE[current_idx - 1].result
+        
         target.status = "执行中"
     
     cfg = core.load_config()
     run_cfg = copy.deepcopy(cfg)
     run_cfg["confirm_before_send"] = False
     template_key = TEMPLATE_LABEL_TO_KEY.get(target.template_label, "custom")
-    prompt = core.build_prompt(template_key, target.user_input)
+    
+    # 动态注入前序结果
+    processed_input = target.user_input.replace("{prev_result}", prev_result)
+    prompt = core.build_prompt(template_key, processed_input)
 
     started = time.time()
     response = ""
@@ -966,18 +590,19 @@ async def _clear_queue():
     return "队列已清空", _render_queue_table()
 
 def build_ui() -> gr.Blocks:
+    import gradio as gr
     provider_labels = [v["label"] for v in PROVIDERS.values()]
 
-    with gr.Blocks(title="网页 AI 半自动助手") as demo:
+    with gr.Blocks(title="Chorus-WebAI | 网页 AI 协同引擎") as demo:
         gr.HTML(
             """
 <div class='hero'>
-  <div class='hero-title'>网页 AI 半自动助手</div>
-  <div class='hero-sub'>现代化配色 多平台模型入口 引导式流程与可审计执行</div>
+  <div class='hero-title'>Chorus-WebAI</div>
+  <div class='hero-sub'>跨平台 AI 协同引擎：让网页 AI 成为您的生产力突触</div>
   <div class='hero-chips'>
-    <span class='hero-chip'>多平台适配</span>
-    <span class='hero-chip'>自动重试和错误日志</span>
-    <span class='hero-chip'>新手引导和一键准备</span>
+    <span class='hero-chip' title='跨模型结果自动传递'>🎭 多模型接力 (Relay)</span>
+    <span class='hero-chip' title='自动截图与执行存证'>📸 视觉证据链</span>
+    <span class='hero-chip' title='语义化元素智能识别'>锚点定位</span>
   </div>
 </div>
 """.strip()
@@ -994,11 +619,10 @@ def build_ui() -> gr.Blocks:
             with gr.Group(elem_classes=["section-card"]):
                 gr.Markdown(
                     """
-<div class='section-title'>常见问题</div>
-1 登录后仍失败 先点击 登录完成检查 再点击 执行冒烟测试
-2 页面元素找不到 在平台与参数把发送方式切到 点击按钮发送
-3 长文本效果差 建议分段执行 每段三千字以内
-4 出现验证码 请在浏览器手动完成后重试
+<div class='section-title'>进阶特性 (Advanced Features)</div>
+- **链式任务**：在批量队列中，您可以使用 `{prev_result}` 引用上一个任务的输出，实现跨模型协作。
+- **证据日志**：任务执行失败后，系统会在 `.semi_agent/errors` 生成带截图的诊断文件，方便复现。
+- **自愈定位**：采用语义锚点技术，即使页面微调，指挥官也能通过“意图”找到输入框。
 """.strip()
                 )
 

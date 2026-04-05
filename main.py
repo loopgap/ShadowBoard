@@ -1,3 +1,14 @@
+"""
+网页 AI 浏览器自动化核心模块 (Browser Automation Core)
+
+本模块使用 Playwright 实现与各大网页 AI (如 DeepSeek, Kimi 等) 的半自动交互。
+支持:
+1. 持久化浏览器会话 (Browser Context Persistence)
+2. 动态元素定位 (Dynamic Selectors)
+3. 响应流式监控与稳定性检测 (Response Monitoring)
+4. 任务重试与异常快照 (Retry & Snapshots)
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,12 +17,13 @@ import textwrap
 import asyncio
 import time
 import traceback
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, AsyncGenerator
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page, Locator, BrowserContext, Playwright
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / ".semi_agent"
@@ -57,8 +69,8 @@ TEMPLATES: Dict[str, str] = {
     "qa": "Answer the request below with concise steps:\n\n{user_input}",
 }
 
-
 def ensure_state() -> None:
+    """初始化必要的状态目录和默认配置文件"""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     ERROR_DIR.mkdir(parents=True, exist_ok=True)
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -69,108 +81,196 @@ def ensure_state() -> None:
 
 
 def load_config() -> Dict[str, Any]:
+    """从磁盘加载配置，验证关键字段，若失败则返回默认值"""
     ensure_state()
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        content = CONFIG_PATH.read_text(encoding="utf-8")
+        if not content.strip():
+            return DEFAULT_CONFIG.copy()
+        data = json.loads(content)
+        
+        # 基础验证：确保 target_url 是合法的 URL
+        url = str(data.get("target_url", "")).strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            print(f"Warning: Invalid target_url in config: {url}. Using default.")
+            data["target_url"] = DEFAULT_CONFIG["target_url"]
+            
         merged = DEFAULT_CONFIG.copy()
         merged.update(data)
         return merged
-    except Exception:
+    except json.JSONDecodeError:
+        print("Warning: config.json is corrupted. Resetting to default.")
         save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG.copy()
+    except Exception as e:
+        print(f"Warning: Failed to load config: {e}. Using default.")
         return DEFAULT_CONFIG.copy()
 
 
 def save_config(config: Dict[str, Any]) -> None:
+    """保存配置到 config.json (UTF-8 编码)"""
     CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
 def append_history(entry: Dict[str, Any]) -> None:
+    """追加任务记录到 history.jsonl"""
     with HISTORY_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
 
 def read_history(limit: int = 10) -> List[Dict[str, Any]]:
-    if not HISTORY_PATH.exists():
+    """
+    高效读取最近的 N 条历史记录。
+    使用从文件末尾倒序读取的方式，避免 O(N) 内存占用。
+    """
+    if not HISTORY_PATH.exists() or HISTORY_PATH.stat().st_size == 0:
         return []
-    lines = HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+
     rows: List[Dict[str, Any]] = []
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-        if len(rows) >= limit:
-            break
+    chunk_size = 4096
+    
+    with HISTORY_PATH.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        buffer = bytearray()
+        pointer = file_size
+        
+        while pointer > 0 and len(rows) < limit:
+            step = min(pointer, chunk_size)
+            pointer -= step
+            f.seek(pointer)
+            new_chunk = f.read(step)
+            buffer = new_chunk + buffer
+            
+            # 从 buffer 中拆分行
+            lines = buffer.splitlines()
+            # 如果不是文件的开头，最后一行可能不完整，保留到下一次循环
+            if pointer > 0:
+                buffer = lines[0]
+                to_process = lines[1:]
+            else:
+                buffer = bytearray()
+                to_process = lines
+                
+            for line in reversed(to_process):
+                if not line.strip():
+                    continue
+                try:
+                    rows.append(json.loads(line.decode("utf-8")))
+                    if len(rows) >= limit:
+                        break
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                    
     return rows
 
 
 def ask_bool(message: str, default: bool = True) -> bool:
+    """CLI 工具函数: 询问用户布尔值"""
     suffix = "[Y/n]" if default else "[y/N]"
-    raw = input(f"{message} {suffix}: ").strip().lower()
-    if not raw:
+    try:
+        raw = input(f"{message} {suffix}: ").strip().lower()
+        if not raw:
+            return default
+        return raw in {"y", "yes"}
+    except (EOFError, KeyboardInterrupt):
         return default
-    return raw in {"y", "yes"}
 
 
 def choose_from_list(title: str, options: List[str]) -> int:
+    """CLI 工具函数: 从列表中选择一项"""
     print(f"\n{title}")
     for i, item in enumerate(options, start=1):
         print(f"  {i}) {item}")
     while True:
-        raw = input("Choose number: ").strip()
-        if raw.isdigit():
-            idx = int(raw)
-            if 1 <= idx <= len(options):
-                return idx - 1
-        print("Invalid input. Try again.")
+        try:
+            raw = input("Choose number: ").strip()
+            if raw.isdigit():
+                idx = int(raw)
+                if 1 <= idx <= len(options):
+                    return idx - 1
+            print("Invalid input. Try again.")
+        except (EOFError, KeyboardInterrupt):
+            return 0
 
 
 def collect_multiline(prompt: str) -> str:
+    """CLI 工具函数: 收集多行输入直到遇到 /end"""
     print(f"\n{prompt}")
     print("Input multiple lines, then type /end on a new line.")
     lines: List[str] = []
     while True:
-        line = input()
-        if line.strip() == "/end":
+        try:
+            line = input()
+            if line.strip() == "/end":
+                break
+            lines.append(line)
+        except (EOFError, KeyboardInterrupt):
             break
-        lines.append(line)
     return "\n".join(lines).strip()
 
 
 def build_prompt(template_key: str, user_input: str) -> str:
+    """根据模板 key 构建最终提示词"""
     if template_key == "custom":
         return user_input
-    return TEMPLATES[template_key].format(user_input=user_input)
+    return TEMPLATES.get(template_key, "{user_input}").format(user_input=user_input)
 
 
-async def get_first_visible_locator(page, selectors: List[str], timeout_ms: int):
+async def get_first_visible_locator(page: Page, selectors: List[str], timeout_ms: int) -> Locator | None:
+    """
+    语义锚点定位策略 (Semantic Anchor Strategy):
+    1. 尝试显式选择器 (CSS/XPath)
+    2. 尝试 A11y 语义角色 (Textbox/Button)
+    3. 尝试视觉占位符
+    """
+    # Step 1: 基础选择器
     for selector in selectors:
         locator = page.locator(selector).first
         try:
-            await locator.wait_for(timeout=timeout_ms)
+            await locator.wait_for(timeout=timeout_ms // 2, state="visible")
             return locator
         except PlaywrightTimeoutError:
             continue
+            
+    # Step 2: 语义降级 (Semantic Fallback)
+    # 针对输入框
+    if "textarea" in selectors[0]:
+        for role in ["textbox", "searchbox"]:
+            loc = page.get_by_role(role).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc
+                
+    # Step 3: 视觉占位符降级
+    placeholders = ["输入", "message", "chat", "问我", "ask"]
+    for p in placeholders:
+        loc = page.get_by_placeholder(p, exact=False).first
+        if await loc.count() > 0 and await loc.is_visible():
+            return loc
+            
     return None
 
 
-async def get_latest_response_text(page, selectors: List[str]) -> str:
+async def get_latest_response_text(page: Page, selectors: List[str]) -> str:
+    """获取页面中最后一条助手回复的内容"""
     best = ""
     for selector in selectors:
         loc = page.locator(selector)
-        count = await loc.count()
-        if count <= 0:
+        try:
+            count = await loc.count()
+            if count <= 0:
+                continue
+            text = await loc.nth(count - 1).inner_text()
+            text = text.strip()
+            if len(text) > len(best):
+                best = text
+        except Exception:
             continue
-        text = await loc.nth(count - 1).inner_text()
-        text = text.strip()
-        if len(text) > len(best):
-            best = text
     return best
 
 
-async def save_error_snapshot(page, error: Exception) -> Path:
+async def save_error_snapshot(page: Page, error: Exception) -> Path:
+    """当任务失败时，保存当前页面截图和错误堆栈信息"""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     shot_path = ERROR_DIR / f"error_{ts}.png"
     txt_path = ERROR_DIR / f"error_{ts}.txt"
@@ -178,19 +278,27 @@ async def save_error_snapshot(page, error: Exception) -> Path:
         await page.screenshot(path=str(shot_path), full_page=True)
     except Exception:
         pass
-    txt_path.write_text(
-        "\n".join([
-            f"time={datetime.now().isoformat()}",
-            f"error={type(error).__name__}: {error}",
-            "traceback:",
-            traceback.format_exc(),
-        ]),
-        encoding="utf-8",
-    )
+    
+    error_info = [
+        f"time={datetime.now().isoformat()}",
+        f"error={type(error).__name__}: {error}",
+        "traceback:",
+        traceback.format_exc(),
+    ]
+    txt_path.write_text("\n".join(error_info), encoding="utf-8")
     return txt_path
 
 
-async def wait_for_response(page, selectors: List[str], timeout_seconds: int, stable_seconds: int):
+async def wait_for_response(
+    page: Page, 
+    selectors: List[str], 
+    timeout_seconds: int, 
+    stable_seconds: int
+) -> AsyncGenerator[str, None]:
+    """
+    监控助手回复的流式更新。
+    当内容在 stable_seconds 内不再变化时，认为生成结束。
+    """
     start = time.time()
     last = ""
     last_change = time.time()
@@ -211,40 +319,49 @@ async def wait_for_response(page, selectors: List[str], timeout_seconds: int, st
 
         await asyncio.sleep(1)
 
-    raise TimeoutError("Timed out while waiting for response.")
+    raise TimeoutError(f"Timed out after {timeout_seconds}s while waiting for response.")
 
 
-async def open_chat_page(config: Dict[str, Any]):
+async def open_chat_page(config: Dict[str, Any]) -> tuple[Playwright, BrowserContext, Page]:
+    """使用持久化 Profile 打开浏览器页面，支持 Edge/Chrome 渠道"""
     p = await async_playwright().start()
     launch_kwargs = {
         "user_data_dir": str(PROFILE_DIR),
         "headless": False,
-        "viewport": {"width": 1320, "height": 900},
+        "viewport": {"width": 1280, "height": 800},
     }
     preferred_channel = str(config.get("browser_channel", "msedge")).strip()
-    if preferred_channel:
-        try:
+    
+    try:
+        if preferred_channel:
             context = await p.chromium.launch_persistent_context(channel=preferred_channel, **launch_kwargs)
-        except Exception:
+        else:
             context = await p.chromium.launch_persistent_context(**launch_kwargs)
-    else:
+    except Exception as e:
+        print(f"Warning: Failed to launch with channel '{preferred_channel}': {e}. Falling back to default chromium.")
         context = await p.chromium.launch_persistent_context(**launch_kwargs)
+        
     page = context.pages[0] if context.pages else await context.new_page()
+    
+    # 设置较短的默认超时
+    page.set_default_timeout(30000)
+    
     await page.goto(
         config["target_url"],
         wait_until="domcontentloaded",
-        timeout=int(config["navigation_timeout_seconds"]) * 1000,
+        timeout=int(config.get("navigation_timeout_seconds", 30)) * 1000,
     )
     return p, context, page
 
 
 async def first_login(config: Dict[str, Any]) -> None:
+    """引导式登录流程，让用户在浏览器中完成登录并保存会话"""
     print("\nOpening browser for first login...")
     p, context, page = await open_chat_page(config)
     try:
-        print("Please finish login in the browser.")
+        print(f"Please finish login at {config['target_url']} in the browser.")
         input("After login and seeing chat input, press Enter here...")
-        locator = await get_first_visible_locator(page, config["input_selectors"], timeout_ms=2500)
+        locator = await get_first_visible_locator(page, config["input_selectors"], timeout_ms=3000)
         if locator is None:
             print("Login check warning: chat input not found yet. You can continue and test with a task.")
         else:
@@ -254,10 +371,11 @@ async def first_login(config: Dict[str, Any]) -> None:
         await p.stop()
 
 
-async def send_once(config: Dict[str, Any], prompt: str):
+async def send_once(config: Dict[str, Any], prompt: str) -> AsyncGenerator[str, None]:
+    """执行单词发送与等待回复流程 (内部核心)"""
     p, context, page = await open_chat_page(config)
     try:
-        input_box = await get_first_visible_locator(page, config["input_selectors"], timeout_ms=4000)
+        input_box = await get_first_visible_locator(page, config["input_selectors"], timeout_ms=5000)
         if input_box is None:
             raise RuntimeError("Chat input not found. You may need to login again or update selectors.")
 
@@ -268,7 +386,7 @@ async def send_once(config: Dict[str, Any], prompt: str):
                 raise RuntimeError("Canceled by user before send.")
 
         if config.get("send_mode") == "button":
-            send_btn = await get_first_visible_locator(page, config["send_button_selectors"], timeout_ms=1200)
+            send_btn = await get_first_visible_locator(page, config["send_button_selectors"], timeout_ms=2000)
             if send_btn is not None:
                 await send_btn.click()
             else:
@@ -279,19 +397,20 @@ async def send_once(config: Dict[str, Any], prompt: str):
         async for chunk in wait_for_response(
             page,
             selectors=config["assistant_selectors"],
-            timeout_seconds=int(config["response_timeout_seconds"]),
-            stable_seconds=int(config["stable_response_seconds"]),
+            timeout_seconds=int(config.get("response_timeout_seconds", 120)),
+            stable_seconds=int(config.get("stable_response_seconds", 3)),
         ):
             yield chunk
     except Exception as exc:
-        debug_path = save_error_snapshot(page, exc)
+        debug_path = await save_error_snapshot(page, exc)
         raise RuntimeError(f"Task failed. Debug file: {debug_path}") from exc
     finally:
         await context.close()
         await p.stop()
 
 
-async def send_with_retry(config: Dict[str, Any], prompt: str):
+async def send_with_retry(config: Dict[str, Any], prompt: str) -> AsyncGenerator[str, None]:
+    """带重试机制的发送流程"""
     retries = max(1, int(config.get("max_retries", 3)))
     backoff = float(config.get("backoff_seconds", 1.5))
     last_error: Optional[Exception] = None
@@ -432,7 +551,7 @@ async def async_main() -> None:
 
     while True:
         print("\n" + "=" * 70)
-        print("Semi-Auto Web AI Agent")
+        print("Chorus-WebAI | 网页 AI 协同引擎")
         print("1) Quick setup (recommended)")
         print("2) First login only")
         print("3) Run task")
