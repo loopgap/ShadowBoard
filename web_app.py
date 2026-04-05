@@ -612,136 +612,126 @@ def build_ui() -> gr.Blocks:
   <div class='hero-title'>Chorus-WebAI</div>
   <div class='hero-sub'>跨平台 AI 协同引擎：让网页 AI 成为您的生产力突触</div>
   <div class='hero-chips'>
-    <span class='hero-chip' title='跨模型结果自动传递'>🎭 多模型接力 (Relay)</span>
-    <span class='hero-chip' title='自动截图与执行存证'>📸 视觉证据链</span>
-    <span class='hero-chip' title='语义化元素智能识别'>锚点定位</span>
+    <span class='hero-chip'>🎭 多模型接力 (Relay)</span>
+    <span class='hero-chip'>📸 视觉证据链</span>
+    <span class='hero-chip'>⚓ 语义锚点</span>
+    <span class='hero-chip'>🛡️ 故障自愈</span>
   </div>
 </div>
 """.strip()
         )
 
-        with gr.Tab("新手向导"):
-            with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown("<div class='section-title'>快速开始</div>")
-                guide_markdown = gr.Markdown()
+        with gr.Tabs():
+            with gr.Tab("🚀 快速上手"):
                 with gr.Row():
-                    refresh_guide_btn = gr.Button("刷新进度建议", elem_classes=["action-secondary"])
-                    one_click_btn = gr.Button("一键准备", elem_classes=["action-primary"])
-
-            with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown(
-                    """
-<div class='section-title'>进阶特性 (Advanced Features)</div>
-- **链式任务**：在批量队列中，您可以使用 `{prev_result}` 引用上一个任务的输出，实现跨模型协作。
-- **证据日志**：任务执行失败后，系统会在 `.semi_agent/errors` 生成带截图的诊断文件，方便复现。
-- **自愈定位**：采用语义锚点技术，即使页面微调，指挥官也能通过“意图”找到输入框。
+                    with gr.Column(scale=2):
+                        with gr.Group(elem_classes=["section-card"]):
+                            gr.Markdown("<div class='section-title'>操作向导</div>")
+                            guide_markdown = gr.Markdown()
+                            with gr.Row():
+                                refresh_guide_btn = gr.Button("刷新进度", elem_classes=["action-secondary"])
+                                one_click_btn = gr.Button("一键初始化环境", elem_classes=["action-primary"])
+                    
+                    with gr.Column(scale=1):
+                        with gr.Group(elem_classes=["section-card"]):
+                            gr.Markdown("<div class='section-title'>智能特性</div>")
+                            gr.Markdown(
+                                """
+- **链式接力**: `{prev_result}` 自动注入
+- **自愈定位**: A11y 语义树 fallback
+- **执行存证**: 自动生成错误快照
+- **本地回退**: 支持 Ollama 离线方案
 """.strip()
-                )
+                            )
 
-        with gr.Tab("平台与参数"):
-            with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown("<div class='section-title'>平台选择</div>")
+            with gr.Tab("⚙️ 平台与配置"):
                 with gr.Row():
-                    provider_label = gr.Dropdown(provider_labels, value=PROVIDERS["deepseek"]["label"], label="目标平台")
-                    apply_provider_btn = gr.Button("应用平台预设", elem_classes=["action-primary"])
-                provider_guide = gr.Textbox(label="平台引导", lines=4, elem_classes=["provider-card"])
+                    with gr.Column(scale=1):
+                        with gr.Group(elem_classes=["section-card"]):
+                            gr.Markdown("<div class='section-title'>平台预设</div>")
+                            provider_label = gr.Dropdown(provider_labels, value=PROVIDERS["deepseek"]["label"], label="目标平台")
+                            apply_provider_btn = gr.Button("应用预设", elem_classes=["action-secondary"])
+                            provider_guide = gr.Textbox(label="平台指引", lines=3, elem_classes=["provider-card"])
 
-            with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown("<div class='section-title'>连接与执行参数</div>")
-                with gr.Row():
-                    target_url = gr.Textbox(label="目标网址", value="https://chat.deepseek.com/", scale=2)
-                    send_mode = gr.Radio(
-                        choices=[("回车发送", "enter"), ("点击按钮发送", "button")],
-                        value="enter",
-                        label="发送方式",
-                        scale=1,
-                    )
-                with gr.Row():
-                    confirm_before_send = gr.Checkbox(value=True, label="执行前需要确认发送")
-                    max_retries = gr.Slider(minimum=1, maximum=6, step=1, value=3, label="失败自动重试次数")
-                    response_timeout = gr.Slider(minimum=30, maximum=600, step=10, value=120, label="响应超时秒数")
-
-                save_btn = gr.Button("保存参数", elem_classes=["action-primary"])
-                setup_status = gr.Textbox(label="状态反馈", lines=4)
+                    with gr.Column(scale=2):
+                        with gr.Group(elem_classes=["section-card"]):
+                            gr.Markdown("<div class='section-title'>执行参数</div>")
+                            with gr.Row():
+                                target_url = gr.Textbox(label="入口地址", scale=2)
+                                send_mode = gr.Radio(choices=[("回车", "enter"), ("点击", "button")], label="交互方式", scale=1)
+                            with gr.Row():
+                                confirm_before_send = gr.Checkbox(label="启用确认发送", value=True)
+                                max_retries = gr.Slider(1, 6, 3, label="重试次数")
+                                response_timeout = gr.Slider(30, 600, 120, label="超时限制 (s)")
+                            save_btn = gr.Button("保存配置", elem_classes=["action-primary"])
 
                 with gr.Row():
-                    open_login_btn = gr.Button("打开登录浏览器", elem_classes=["action-secondary"])
-                    finish_login_btn = gr.Button("登录完成检查", elem_classes=["action-secondary"])
-                    smoke_btn = gr.Button("执行冒烟测试", elem_classes=["action-primary"])
+                    with gr.Column():
+                        with gr.Group(elem_classes=["section-card"]):
+                            gr.Markdown("<div class='section-title'>浏览器会话控制</div>")
+                            with gr.Row():
+                                open_login_btn = gr.Button("🔑 打开登录窗口", elem_classes=["action-secondary"])
+                                finish_login_btn = gr.Button("✅ 登录状态验证", elem_classes=["action-secondary"])
+                                smoke_btn = gr.Button("🔥 链路冒烟测试", elem_classes=["action-primary"])
+                            with gr.Row():
+                                smoke_confirm = gr.Checkbox(label="我已准备好测试")
+                                smoke_pause = gr.Slider(0, 15, 3, label="测试前暂停 (s)")
+                                setup_status = gr.Textbox(label="系统日志", lines=1)
 
+            with gr.Tab("📝 执行任务"):
                 with gr.Row():
-                    smoke_confirm = gr.Checkbox(value=False, label="我确认开始冒烟测试")
-                    smoke_pause = gr.Slider(minimum=0, maximum=15, step=1, value=3, label="冒烟测试暂停秒数")
+                    with gr.Column(scale=1):
+                        with gr.Group(elem_classes=["section-card"]):
+                            gr.Markdown("<div class='section-title'>任务编排</div>")
+                            template_label = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="摘要总结", label="任务模板")
+                            template_help = gr.Markdown()
+                            task_input = gr.Textbox(label="输入原始内容", lines=12, placeholder="在此粘贴文本或输入指令...")
+                            input_tip = gr.Markdown()
+                            send_confirm = gr.Checkbox(label="确认发送 (建议开启)", value=True)
+                            with gr.Row():
+                                run_btn = gr.Button("立即执行", elem_classes=["action-primary"])
+                                reuse_btn = gr.Button("填入上次内容", elem_classes=["action-secondary"])
 
-        with gr.Tab("执行任务"):
-            with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown("<div class='section-title'>任务输入</div>")
-                template_label = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="摘要总结", label="任务模板")
-                template_help = gr.Markdown(_template_help("摘要总结"))
-                task_input = gr.Textbox(label="任务输入", lines=10, placeholder="示例 请总结这段内容 并给出三条下一步建议")
-                input_tip = gr.Markdown("输入提示 请粘贴正文或直接写需求")
-                send_confirm = gr.Checkbox(value=True, label="我确认发送本次任务")
-                with gr.Row():
-                    run_btn = gr.Button("开始执行", elem_classes=["action-primary"])
-                    reuse_btn = gr.Button("复用上次输入", elem_classes=["action-secondary"])
-                gr.Examples(examples=EXAMPLE_INPUTS, inputs=[template_label, task_input], label="示例输入 点击自动填充")
+                    with gr.Column(scale=1):
+                        with gr.Group(elem_classes=["section-card"]):
+                            gr.Markdown("<div class='section-title'>执行反馈</div>")
+                            run_status = gr.Textbox(label="执行进度", lines=1)
+                            prompt_preview = gr.Textbox(label="提示词预览", lines=2, visible=False)
+                            response_box = gr.Textbox(label="AI 响应内容", lines=18)
+                            with gr.Row():
+                                export_btn = gr.Button("导出 MD 报告", elem_classes=["action-secondary"])
+                                export_file = gr.File(label="点击下载", interactive=False)
+                                export_status = gr.Textbox(label="导出状态", lines=1, visible=False)
 
-            with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown("<div class='section-title'>执行结果</div>")
-                run_status = gr.Textbox(label="执行状态", lines=2)
-                prompt_preview = gr.Textbox(label="生成提示词预览", lines=8)
-                response_box = gr.Textbox(label="AI 返回结果", lines=16)
-                with gr.Row():
-                    export_btn = gr.Button("导出结果", elem_classes=["action-secondary"])
-                    export_file = gr.File(label="下载文件", interactive=False)
-                    export_status = gr.Textbox(label="导出状态", lines=2)
-
-        with gr.Tab("历史与诊断"):
-            with gr.Group(elem_classes=["section-card"]):
-                with gr.Row():
-                    history_filter = gr.Radio(choices=HISTORY_FILTERS, value="全部", label="历史筛选", elem_id="history-filter")
-                    refresh_history_btn = gr.Button("刷新历史", elem_classes=["action-secondary"])
-
-                history_grid = gr.Dataframe(
-                    headers=["时间", "模板", "耗时秒", "返回字数", "结果", "错误摘要"],
-                    datatype=["str", "str", "number", "number", "str", "str"],
-                    row_count=15,
-                    column_count=(6, "fixed"),
-                    wrap=True,
-                    interactive=False,
-                    elem_id="history-table",
-                )
-
-                with gr.Row():
-                    clear_history_btn = gr.Button("清空历史", elem_classes=["action-secondary"])
-                    health_btn = gr.Button("健康检查", elem_classes=["action-secondary"])
-                    error_btn = gr.Button("查看最近错误日志", elem_classes=["action-secondary"])
-
-                diag_box = gr.Textbox(label="诊断输出", lines=14)
-
-
-        with gr.Tab("批量队列"):
-            with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown("<div class='section-title'>添加任务到队列</div>")
-                q_template = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="摘要总结", label="任务模板")
-                q_input = gr.Textbox(label="任务输入", lines=3)
-                q_add_btn = gr.Button("加入队列", elem_classes=["action-secondary"])
-                q_add_status = gr.Textbox(label="添加状态", lines=1)
+            with gr.Tab("📊 批量任务队列"):
+                with gr.Group(elem_classes=["section-card"]):
+                    gr.Markdown("<div class='section-title'>添加链式任务</div>")
+                    with gr.Row():
+                        q_template = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="摘要总结", label="模板")
+                        q_input = gr.Textbox(label="内容 (支持 {prev_result})", scale=3)
+                        q_add_btn = gr.Button("加入队列", elem_classes=["action-primary"], scale=1)
+                        q_add_status = gr.Textbox(label="添加结果", lines=1, visible=False)
                 
-            with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown("<div class='section-title'>队列展示与执行</div>")
-                with gr.Row():
-                    q_refresh_btn = gr.Button("刷新队列", elem_classes=["action-secondary"])
-                    q_clear_btn = gr.Button("清空队列", elem_classes=["action-secondary"])
-                    q_run_btn = gr.Button("执行队列首个任务", elem_classes=["action-primary"])
-                
-                q_run_status = gr.Textbox(label="执行状态", lines=1)
-                q_grid = gr.Dataframe(
-                    headers=["ID", "添加时间", "模板", "内容预览", "状态", "结果摘要"],
-                    datatype=["str", "str", "str", "str", "str", "str"],
-                    row_count=10,
-                    interactive=False,
-                )
+                with gr.Group(elem_classes=["section-card"]):
+                    gr.Markdown("<div class='section-title'>队列监控</div>")
+                    with gr.Row():
+                        q_run_btn = gr.Button("▶ 执行首项", elem_classes=["action-primary"])
+                        q_clear_btn = gr.Button("🗑️ 清空全部", elem_classes=["action-secondary"])
+                        q_refresh_btn = gr.Button("🔄 刷新状态", elem_classes=["action-secondary"])
+                    q_run_status = gr.Textbox(label="运行状态", lines=1)
+                    q_grid = gr.Dataframe(headers=["ID", "添加时间", "模板", "预览", "状态", "结果"], interactive=False)
+
+            with gr.Tab("🛠️ 诊断与历史"):
+                with gr.Group(elem_classes=["section-card"]):
+                    with gr.Row():
+                        history_filter = gr.Radio(choices=HISTORY_FILTERS, value="全部", label="结果过滤")
+                        refresh_history_btn = gr.Button("同步历史", elem_classes=["action-secondary"])
+                    history_grid = gr.Dataframe(interactive=False)
+                    with gr.Row():
+                        health_btn = gr.Button("系统体检", elem_classes=["action-secondary"])
+                        error_btn = gr.Button("日志回溯", elem_classes=["action-secondary"])
+                        clear_history_btn = gr.Button("清空记录", elem_classes=["action-secondary"])
+                    diag_box = gr.Textbox(label="控制台输出", lines=10, elem_classes=["provider-card"])
 
         with gr.Tab("帮助文档"):
             with gr.Group(elem_classes=["section-card"]):
@@ -834,10 +824,20 @@ def build_ui() -> gr.Blocks:
 
 def main() -> None:
     _ensure_dirs()
+    # 确保元数据已加载，以便 build_ui 能正确渲染
+    _load_metadata()
+    import gradio as gr
     app = build_ui()
     app.queue(default_concurrency_limit=1)
     port = _pick_available_port(7860, 7875)
-    app.launch(server_name="127.0.0.1", server_port=port, inbrowser=True, theme=gr.themes.Soft(), css=CUSTOM_CSS)
+    
+    app.launch(
+        server_name="127.0.0.1", 
+        server_port=port, 
+        inbrowser=True, 
+        theme=gr.themes.Soft(), 
+        css=CUSTOM_CSS
+    )
 
 
 if __name__ == "__main__":

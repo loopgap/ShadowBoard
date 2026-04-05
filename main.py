@@ -347,18 +347,29 @@ async def open_chat_page(config: Dict[str, Any]) -> tuple[Playwright, BrowserCon
     }
     preferred_channel = str(config.get("browser_channel", "msedge")).strip()
     
+    # 探测到的硬路径回退
+    HARD_CHROME_PATH = r"C:\Users\32806\AppData\Local\Google\Chrome\Application\chrome.exe"
+    
     try:
         if preferred_channel:
             context = await p.chromium.launch_persistent_context(channel=preferred_channel, **launch_kwargs)
         else:
             context = await p.chromium.launch_persistent_context(**launch_kwargs)
     except Exception as e:
-        print(f"Warning: Failed to launch with channel '{preferred_channel}': {e}. Falling back to default chromium.")
+        print(f"Warning: Failed to launch with channel '{preferred_channel}': {e}.")
+        print(f"Attempting hard path fallback: {HARD_CHROME_PATH}")
         try:
-            context = await p.chromium.launch_persistent_context(**launch_kwargs)
+            # 移除 channel 参数，改用 executable_path
+            fallback_kwargs = launch_kwargs.copy()
+            fallback_kwargs["executable_path"] = HARD_CHROME_PATH
+            context = await p.chromium.launch_persistent_context(**fallback_kwargs)
         except Exception as inner_e:
-            await p.stop()
-            raise RuntimeError(f"Critical: Browser failed to launch: {inner_e}") from inner_e
+            print(f"Hard path fallback failed: {inner_e}. Final attempt with default chromium.")
+            try:
+                context = await p.chromium.launch_persistent_context(**launch_kwargs)
+            except Exception as final_e:
+                await p.stop()
+                raise RuntimeError(f"Critical: Browser failed to launch after 3 attempts: {final_e}") from final_e
         
     if not context.pages:
         await context.new_page()
@@ -376,7 +387,6 @@ async def open_chat_page(config: Dict[str, Any]) -> tuple[Playwright, BrowserCon
         )
     except Exception as e:
         print(f"Navigation warning: {e}")
-        # 即使跳转超时，只要页面已经加载（部分），也可尝试继续
         
     return p, context, page
 
