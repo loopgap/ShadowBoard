@@ -1,18 +1,29 @@
 """
-网页 AI 浏览器自动化核心模块 (Browser Automation Core)
+Chorus-WebAI Main Entry Point (Refactored)
 
-本模块使用 Playwright 实现与各大网页 AI (如 DeepSeek, Kimi 等) 的半自动交互。
-支持:
-1. 持久化浏览器会话 (Browser Context Persistence)
-2. 动态元素定位 (Dynamic Selectors)
-3. 响应流式监控与稳定性检测 (Response Monitoring)
-4. 任务重试与异常快照 (Retry & Snapshots)
+This module provides the CLI interface while delegating to the new modular architecture.
 """
 
 from __future__ import annotations
 
-import json
 import sys
+from pathlib import Path
+
+__version__ = "2.3.0"
+
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+from src.core.config import get_config_manager
+from src.core.browser import get_first_visible_locator, get_latest_response_text
+from src.services.task_tracker import TaskTracker
+from src.services.memory_store import MemoryStore, SessionManager
+from src.services.workflow import WorkflowEngine
+from src.services.monitor import Monitor
+from src.utils.helpers import build_prompt
+
+# Legacy imports for backward compatibility
+import json
 import textwrap
 import asyncio
 import time
@@ -20,20 +31,11 @@ import traceback
 import os
 import httpx
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional, AsyncGenerator
 
-# 针对 Python 性能的优化：在非 Windows 环境下尝试使用 uvloop
-if sys.platform != "win32":
-    try:
-        import uvloop
-        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    except ImportError:
-        pass
+from playwright.async_api import async_playwright, Page, BrowserContext, Playwright
 
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from playwright.async_api import async_playwright, Page, Locator, BrowserContext, Playwright
-
+# Legacy constants (for backward compatibility)
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / ".semi_agent"
 CONFIG_PATH = STATE_DIR / "config.json"
@@ -41,35 +43,7 @@ HISTORY_PATH = STATE_DIR / "history.jsonl"
 ERROR_DIR = STATE_DIR / "errors"
 PROFILE_DIR = STATE_DIR / "browser_profile"
 
-DEFAULT_CONFIG: Dict[str, Any] = {
-    "target_url": "https://chat.deepseek.com/",
-    "browser_channel": "msedge",
-    "send_mode": "enter",
-    "confirm_before_send": True,
-    "max_retries": 3,
-    "backoff_seconds": 1.5,
-    "input_selectors": [
-        "textarea",
-        "[contenteditable='true']",
-        "textarea[placeholder*='message' i]",
-        "textarea[placeholder*='chat' i]",
-    ],
-    "assistant_selectors": [
-        "[data-role='assistant']",
-        ".assistant",
-        ".markdown",
-        "article",
-    ],
-    "send_button_selectors": [
-        "button[type='submit']",
-        "button[aria-label*='send' i]",
-    ],
-    "navigation_timeout_seconds": 30,
-    "response_timeout_seconds": 120,
-    "stable_response_seconds": 3,
-    "smoke_pause_seconds": 3,
-}
-
+# Legacy templates
 TEMPLATES: Dict[str, str] = {
     "summary": "Summarize the following content in 5 bullets:\n\n{user_input}",
     "translation": "Translate the following text to Chinese and keep meaning precise:\n\n{user_input}",
@@ -78,67 +52,98 @@ TEMPLATES: Dict[str, str] = {
     "qa": "Answer the request below with concise steps:\n\n{user_input}",
 }
 
+# Global service instances
+_task_tracker: Optional[TaskTracker] = None
+_memory_store: Optional[MemoryStore] = None
+_session_manager: Optional[SessionManager] = None
+_workflow_engine: Optional[WorkflowEngine] = None
+_monitor: Optional[Monitor] = None
+
+
+def get_task_tracker() -> TaskTracker:
+    """Get or create the global TaskTracker instance."""
+    global _task_tracker
+    if _task_tracker is None:
+        _task_tracker = TaskTracker()
+    return _task_tracker
+
+
+def get_memory_store() -> MemoryStore:
+    """Get or create the global MemoryStore instance."""
+    global _memory_store
+    if _memory_store is None:
+        _memory_store = MemoryStore()
+    return _memory_store
+
+
+def get_session_manager() -> SessionManager:
+    """Get or create the global SessionManager instance."""
+    global _session_manager
+    if _session_manager is None:
+        _session_manager = SessionManager(get_memory_store())
+    return _session_manager
+
+
+def get_workflow_engine() -> WorkflowEngine:
+    """Get or create the global WorkflowEngine instance."""
+    global _workflow_engine
+    if _workflow_engine is None:
+        _workflow_engine = WorkflowEngine()
+    return _workflow_engine
+
+
+def get_monitor() -> Monitor:
+    """Get or create the global Monitor instance."""
+    global _monitor
+    if _monitor is None:
+        _monitor = Monitor()
+    return _monitor
+
+
+# ============== Legacy Functions (for backward compatibility) ==============
+
 def ensure_state() -> None:
-    """初始化必要的状态目录和默认配置文件"""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    ERROR_DIR.mkdir(parents=True, exist_ok=True)
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    if not CONFIG_PATH.exists():
-        save_config(DEFAULT_CONFIG)
-    if not HISTORY_PATH.exists():
-        HISTORY_PATH.touch()
+    """Initialize necessary state directories and default config file."""
+    config = get_config_manager()
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.error_dir.mkdir(parents=True, exist_ok=True)
+    config.profile_dir.mkdir(parents=True, exist_ok=True)
+    if not config.config_path.exists():
+        config._save_config(config.get_all())
+    if not config.history_path.exists():
+        config.history_path.touch()
 
 
 def load_config() -> Dict[str, Any]:
-    """从磁盘加载配置，验证关键字段，若失败则返回默认值"""
-    ensure_state()
-    try:
-        content = CONFIG_PATH.read_text(encoding="utf-8")
-        if not content.strip():
-            return DEFAULT_CONFIG.copy()
-        data = json.loads(content)
-        
-        # 基础验证：确保 target_url 是合法的 URL
-        url = str(data.get("target_url", "")).strip()
-        if not (url.startswith("http://") or url.startswith("https://")):
-            print(f"Warning: Invalid target_url in config: {url}. Using default.")
-            data["target_url"] = DEFAULT_CONFIG["target_url"]
-            
-        merged = DEFAULT_CONFIG.copy()
-        merged.update(data)
-        return merged
-    except json.JSONDecodeError:
-        print("Warning: config.json is corrupted. Resetting to default.")
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
-    except Exception as e:
-        print(f"Warning: Failed to load config: {e}. Using default.")
-        return DEFAULT_CONFIG.copy()
+    """Load configuration from disk."""
+    return get_config_manager().get_all()
 
 
 def save_config(config: Dict[str, Any]) -> None:
-    """保存配置到 config.json (UTF-8 编码)"""
-    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
+    """Save configuration to config.json."""
+    get_config_manager().update(config, save=True)
 
 
 def append_history(entry: Dict[str, Any]) -> None:
-    """追加任务记录到 history.jsonl"""
-    with HISTORY_PATH.open("a", encoding="utf-8") as f:
+    """Append task record to history.jsonl."""
+    config = get_config_manager()
+    with config.history_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
 
 def read_history(limit: int = 10) -> List[Dict[str, Any]]:
     """
-    高效读取最近的 N 条历史记录。
-    使用从文件末尾倒序读取的方式，避免 O(N) 内存占用。
+    Efficiently read the last N history records.
+    Uses reverse file reading to avoid O(N) memory usage.
     """
-    if not HISTORY_PATH.exists() or HISTORY_PATH.stat().st_size == 0:
+    config = get_config_manager()
+    if not config.history_path.exists() or config.history_path.stat().st_size == 0:
         return []
 
     rows: List[Dict[str, Any]] = []
     chunk_size = 4096
     
-    with HISTORY_PATH.open("rb") as f:
+    with config.history_path.open("rb") as f:
         f.seek(0, os.SEEK_END)
         file_size = f.tell()
         buffer = bytearray()
@@ -151,9 +156,7 @@ def read_history(limit: int = 10) -> List[Dict[str, Any]]:
             new_chunk = f.read(step)
             buffer = new_chunk + buffer
             
-            # 从 buffer 中拆分行
             lines = buffer.splitlines()
-            # 如果不是文件的开头，最后一行可能不完整，保留到下一次循环
             if pointer > 0:
                 buffer = lines[0]
                 to_process = lines[1:]
@@ -174,8 +177,10 @@ def read_history(limit: int = 10) -> List[Dict[str, Any]]:
     return rows
 
 
+# ============== CLI Helper Functions ==============
+
 def ask_bool(message: str, default: bool = True) -> bool:
-    """CLI 工具函数: 询问用户布尔值"""
+    """CLI utility: ask user for boolean input."""
     suffix = "[Y/n]" if default else "[y/N]"
     try:
         raw = input(f"{message} {suffix}: ").strip().lower()
@@ -187,7 +192,7 @@ def ask_bool(message: str, default: bool = True) -> bool:
 
 
 def choose_from_list(title: str, options: List[str]) -> int:
-    """CLI 工具函数: 从列表中选择一项"""
+    """CLI utility: choose from a list."""
     print(f"\n{title}")
     for i, item in enumerate(options, start=1):
         print(f"  {i}) {item}")
@@ -204,7 +209,7 @@ def choose_from_list(title: str, options: List[str]) -> int:
 
 
 def collect_multiline(prompt: str) -> str:
-    """CLI 工具函数: 收集多行输入直到遇到 /end"""
+    """CLI utility: collect multiline input until /end."""
     print(f"\n{prompt}")
     print("Input multiple lines, then type /end on a new line.")
     lines: List[str] = []
@@ -219,70 +224,66 @@ def collect_multiline(prompt: str) -> str:
     return "\n".join(lines).strip()
 
 
-def build_prompt(template_key: str, user_input: str) -> str:
-    """根据模板 key 构建最终提示词"""
-    if template_key == "custom":
-        return user_input
-    return TEMPLATES.get(template_key, "{user_input}").format(user_input=user_input)
+# ============== Browser Functions ==============
 
-
-async def get_first_visible_locator(page: Page, selectors: List[str], timeout_ms: int) -> Locator | None:
-    """
-    语义锚点定位策略 (Semantic Anchor Strategy):
-    1. 尝试显式选择器 (CSS/XPath)
-    2. 尝试 A11y 语义角色 (Textbox/Button)
-    3. 尝试视觉占位符
-    """
-    # Step 1: 基础选择器
-    for selector in selectors:
-        locator = page.locator(selector).first
+async def open_chat_page(config: Dict[str, Any]) -> tuple[Playwright, BrowserContext, Page]:
+    """Open browser page with persistent profile."""
+    config_mgr = get_config_manager()
+    p = await async_playwright().start()
+    launch_kwargs = {
+        "user_data_dir": str(config_mgr.profile_dir),
+        "headless": False,
+        "viewport": {"width": 1280, "height": 800},
+    }
+    preferred_channel = str(config.get("browser_channel", "msedge")).strip()
+    
+    HARD_CHROME_PATH = r"C:\Users\32806\AppData\Local\Google\Chrome\Application\chrome.exe"
+    
+    try:
+        if preferred_channel:
+            context = await p.chromium.launch_persistent_context(channel=preferred_channel, **launch_kwargs)
+        else:
+            context = await p.chromium.launch_persistent_context(**launch_kwargs)
+    except Exception as e:
+        print(f"Warning: Failed to launch with channel '{preferred_channel}': {e}.")
+        print(f"Attempting hard path fallback: {HARD_CHROME_PATH}")
         try:
-            await locator.wait_for(timeout=timeout_ms // 2, state="visible")
-            return locator
-        except PlaywrightTimeoutError:
-            continue
-            
-    # Step 2: 语义降级 (Semantic Fallback)
-    # 针对输入框
-    if "textarea" in selectors[0]:
-        for role in ["textbox", "searchbox"]:
-            loc = page.get_by_role(role).first
-            if await loc.count() > 0 and await loc.is_visible():
-                return loc
-                
-    # Step 3: 视觉占位符降级
-    placeholders = ["输入", "message", "chat", "问我", "ask"]
-    for p in placeholders:
-        loc = page.get_by_placeholder(p, exact=False).first
-        if await loc.count() > 0 and await loc.is_visible():
-            return loc
-            
-    return None
-
-
-async def get_latest_response_text(page: Page, selectors: List[str]) -> str:
-    """获取页面中最后一条助手回复的内容"""
-    best = ""
-    for selector in selectors:
-        loc = page.locator(selector)
-        try:
-            count = await loc.count()
-            if count <= 0:
-                continue
-            text = await loc.nth(count - 1).inner_text()
-            text = text.strip()
-            if len(text) > len(best):
-                best = text
-        except Exception:
-            continue
-    return best
+            fallback_kwargs = launch_kwargs.copy()
+            fallback_kwargs["executable_path"] = HARD_CHROME_PATH
+            context = await p.chromium.launch_persistent_context(**fallback_kwargs)
+        except Exception as inner_e:
+            print(f"Hard path fallback failed: {inner_e}. Final attempt with default chromium.")
+            try:
+                context = await p.chromium.launch_persistent_context(**launch_kwargs)
+            except Exception as final_e:
+                await p.stop()
+                raise RuntimeError(f"Critical: Browser failed to launch after 3 attempts: {final_e}") from final_e
+        
+    if not context.pages:
+        await context.new_page()
+    page = context.pages[0]
+    
+    page.set_default_timeout(30000)
+    page.set_default_navigation_timeout(60000)
+    
+    try:
+        await page.goto(
+            config["target_url"],
+            wait_until="domcontentloaded",
+            timeout=int(config.get("navigation_timeout_seconds", 30)) * 1000,
+        )
+    except Exception as e:
+        print(f"Navigation warning: {e}")
+        
+    return p, context, page
 
 
 async def save_error_snapshot(page: Page, error: Exception) -> Path:
-    """当任务失败时，保存当前页面截图和错误堆栈信息"""
+    """Save screenshot and error trace when task fails."""
+    config = get_config_manager()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    shot_path = ERROR_DIR / f"error_{ts}.png"
-    txt_path = ERROR_DIR / f"error_{ts}.txt"
+    shot_path = config.error_dir / f"error_{ts}.png"
+    txt_path = config.error_dir / f"error_{ts}.txt"
     try:
         await page.screenshot(path=str(shot_path), full_page=True)
     except Exception:
@@ -304,10 +305,7 @@ async def wait_for_response(
     timeout_seconds: int, 
     stable_seconds: int
 ) -> AsyncGenerator[str, None]:
-    """
-    监控助手回复的流式更新。
-    当内容在 stable_seconds 内不再变化时，认为生成结束。
-    """
+    """Monitor assistant response stream."""
     start = time.time()
     last = ""
     last_change = time.time()
@@ -316,7 +314,6 @@ async def wait_for_response(
         try:
             current = await get_latest_response_text(page, selectors)
         except Exception as e:
-            # 记录异常但不中断，等待下一次尝试
             print(f"Warning during stream read: {e}")
             current = ""
 
@@ -325,11 +322,9 @@ async def wait_for_response(
             last_change = time.time()
             yield last
         elif not current and not last:
-            # 初始阶段未获取到内容，不更新计时器
             pass
 
         if last and (time.time() - last_change) >= stable_seconds:
-            # 内容已稳定超过预设时间，认为输出完毕
             return
 
         await asyncio.sleep(1)
@@ -337,62 +332,8 @@ async def wait_for_response(
     raise TimeoutError(f"Timed out after {timeout_seconds}s while waiting for response. Current length: {len(last)}")
 
 
-async def open_chat_page(config: Dict[str, Any]) -> tuple[Playwright, BrowserContext, Page]:
-    """使用持久化 Profile 打开浏览器页面，支持 Edge/Chrome 渠道"""
-    p = await async_playwright().start()
-    launch_kwargs = {
-        "user_data_dir": str(PROFILE_DIR),
-        "headless": False,
-        "viewport": {"width": 1280, "height": 800},
-    }
-    preferred_channel = str(config.get("browser_channel", "msedge")).strip()
-    
-    # 探测到的硬路径回退
-    HARD_CHROME_PATH = r"C:\Users\32806\AppData\Local\Google\Chrome\Application\chrome.exe"
-    
-    try:
-        if preferred_channel:
-            context = await p.chromium.launch_persistent_context(channel=preferred_channel, **launch_kwargs)
-        else:
-            context = await p.chromium.launch_persistent_context(**launch_kwargs)
-    except Exception as e:
-        print(f"Warning: Failed to launch with channel '{preferred_channel}': {e}.")
-        print(f"Attempting hard path fallback: {HARD_CHROME_PATH}")
-        try:
-            # 移除 channel 参数，改用 executable_path
-            fallback_kwargs = launch_kwargs.copy()
-            fallback_kwargs["executable_path"] = HARD_CHROME_PATH
-            context = await p.chromium.launch_persistent_context(**fallback_kwargs)
-        except Exception as inner_e:
-            print(f"Hard path fallback failed: {inner_e}. Final attempt with default chromium.")
-            try:
-                context = await p.chromium.launch_persistent_context(**launch_kwargs)
-            except Exception as final_e:
-                await p.stop()
-                raise RuntimeError(f"Critical: Browser failed to launch after 3 attempts: {final_e}") from final_e
-        
-    if not context.pages:
-        await context.new_page()
-    page = context.pages[0]
-    
-    # 设置合理的超时限制
-    page.set_default_timeout(30000)
-    page.set_default_navigation_timeout(60000)
-    
-    try:
-        await page.goto(
-            config["target_url"],
-            wait_until="domcontentloaded",
-            timeout=int(config.get("navigation_timeout_seconds", 30)) * 1000,
-        )
-    except Exception as e:
-        print(f"Navigation warning: {e}")
-        
-    return p, context, page
-
-
 async def first_login(config: Dict[str, Any]) -> None:
-    """引导式登录流程，让用户在浏览器中完成登录并保存会话"""
+    """Guided login flow."""
     print("\nOpening browser for first login...")
     p, context, page = await open_chat_page(config)
     try:
@@ -409,7 +350,7 @@ async def first_login(config: Dict[str, Any]) -> None:
 
 
 async def send_once(config: Dict[str, Any], prompt: str) -> AsyncGenerator[str, None]:
-    """执行单词发送与等待回复流程 (内部核心)"""
+    """Execute single send and wait for response."""
     p, context, page = await open_chat_page(config)
     try:
         input_box = await get_first_visible_locator(page, config["input_selectors"], timeout_ms=5000)
@@ -447,10 +388,7 @@ async def send_once(config: Dict[str, Any], prompt: str) -> AsyncGenerator[str, 
 
 
 async def send_local_ollama(config: Dict[str, Any], prompt: str) -> AsyncGenerator[str, None]:
-    """
-    本地 AI 接口实现 (针对 Ollama/OpenAI-compatible)
-    作为网页端失效时的自动降级方案。
-    """
+    """Local AI interface implementation (Ollama/OpenAI-compatible)."""
     url = config.get("target_url", "http://localhost:11434/v1/chat/completions")
     payload = {
         "model": config.get("local_model", "llama3"),
@@ -481,21 +419,18 @@ async def send_local_ollama(config: Dict[str, Any], prompt: str) -> AsyncGenerat
 
 
 async def send_with_retry(config: Dict[str, Any], prompt: str) -> AsyncGenerator[str, None]:
-    """
-    带重试与自动降级机制的发送流程。
-    如果网页端重试失败，将自动尝试本地 AI (若配置)。
-    """
+    """Send with retry and automatic fallback to local AI."""
     retries = max(1, int(config.get("max_retries", 3)))
     backoff = float(config.get("backoff_seconds", 1.5))
     last_error: Optional[Exception] = None
     
-    # 检查是否为本地模式
+    # Check if API mode
     if config.get("send_mode") == "api":
         async for chunk in send_local_ollama(config, prompt):
             yield chunk
         return
 
-    # 网页端重试循环
+    # Web retry loop
     for attempt in range(1, retries + 1):
         try:
             async for chunk in send_once(config, prompt):
@@ -509,10 +444,9 @@ async def send_with_retry(config: Dict[str, Any], prompt: str) -> AsyncGenerator
                 print(f"Retrying in {wait_s:.1f}s...")
                 await asyncio.sleep(wait_s)
     
-    # 网页端彻底失败，触发自动降级 (若非本地模式且存在本地配置)
+    # Fallback to local AI
     print("\n[Fallback] Web AI failed all retries. Attempting Local AI (Ollama) fallback...")
     try:
-        # 临时切换到本地配置执行
         local_cfg = config.copy()
         local_cfg["target_url"] = "http://localhost:11434/v1/chat/completions"
         async for chunk in send_local_ollama(local_cfg, prompt):
@@ -522,7 +456,68 @@ async def send_with_retry(config: Dict[str, Any], prompt: str) -> AsyncGenerator
         raise RuntimeError(f"Both Web and Local AI failed. Last Web Error: {last_error}")
 
 
+# ============== Task Execution with Tracking ==============
+
+async def run_task_tracked(config: Dict[str, Any], template_key: str, user_input: str) -> str:
+    """
+    Execute a task with full tracking via the new TaskTracker service.
+    Returns the response text.
+    """
+    tracker = get_task_tracker()
+    monitor = get_monitor()
+    
+    # Create task
+    task = await tracker.create_task(
+        template_key=template_key,
+        user_input=user_input,
+        prompt=build_prompt(template_key, user_input),
+    )
+    
+    # Start execution
+    await tracker.start_task(task.id)
+    
+    started = time.time()
+    response = ""
+    
+    try:
+        async for chunk in send_with_retry(config, task.prompt):
+            response = chunk
+        
+        await tracker.complete_task(task.id, response)
+        monitor.record_task_execution(True, time.time() - started, template_key)
+        
+        # Record to history
+        append_history({
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "template": template_key,
+            "input_chars": len(user_input),
+            "response_chars": len(response),
+            "duration_seconds": round(time.time() - started, 2),
+            "ok": True,
+            "task_id": task.id,
+        })
+        
+    except Exception as e:
+        await tracker.fail_task(task.id, str(e))
+        monitor.record_task_execution(False, time.time() - started, template_key)
+        
+        append_history({
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "template": template_key,
+            "input_chars": len(user_input),
+            "response_chars": 0,
+            "duration_seconds": round(time.time() - started, 2),
+            "ok": False,
+            "error": str(e),
+            "task_id": task.id,
+        })
+        raise
+    
+    return response
+
+
 async def run_task(config: Dict[str, Any]) -> None:
+    """Run interactive task (legacy CLI mode)."""
     keys = list(TEMPLATES.keys()) + ["custom"]
     idx = choose_from_list("Select task template", keys)
     template_key = keys[idx]
@@ -559,6 +554,7 @@ async def run_task(config: Dict[str, Any]) -> None:
 
 
 def show_history() -> None:
+    """Display recent history."""
     rows = read_history(limit=15)
     if not rows:
         print("No history yet.")
@@ -574,6 +570,7 @@ def show_history() -> None:
 
 
 def edit_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Interactive config editor."""
     while True:
         print("\nConfig")
         print(f"1) target_url = {config['target_url']}")
@@ -610,6 +607,7 @@ def edit_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def quick_setup(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Guided quick setup."""
     print("\nQuick setup")
     print("Step 1/3: target page")
     if ask_bool("Use default target URL (https://chat.deepseek.com/)?", default=True):
@@ -637,17 +635,20 @@ async def quick_setup(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def async_main() -> None:
+    """Main CLI entry point."""
     ensure_state()
     config = load_config()
 
     while True:
         print("\n" + "=" * 70)
-        print("Chorus-WebAI | 网页 AI 协同引擎")
+        print("Chorus-WebAI | Web AI Orchestration Engine v2.3")
         print("1) Quick setup (recommended)")
         print("2) First login only")
         print("3) Run task")
         print("4) Recent history")
         print("5) Settings")
+        print("6) Task statistics")
+        print("7) System health")
         print("0) Exit")
 
         choice = input("Choose: ").strip()
@@ -662,6 +663,17 @@ async def async_main() -> None:
                 show_history()
             elif choice == "5":
                 config = edit_config(config)
+            elif choice == "6":
+                tracker = get_task_tracker()
+                stats = tracker.get_statistics()
+                print("\nTask Statistics:")
+                for k, v in stats.items():
+                    print(f"  {k}: {v}")
+            elif choice == "7":
+                monitor = get_monitor()
+                health = monitor.get_system_health()
+                print(f"\nSystem Health: {'Healthy' if health.healthy else 'Issues detected'}")
+                print(f"Message: {health.message}")
             elif choice == "0":
                 print("Bye.")
                 return
@@ -674,7 +686,9 @@ async def async_main() -> None:
 
 
 def main():
+    """Entry point."""
     asyncio.run(async_main())
+
 
 if __name__ == "__main__":
     try:

@@ -7,6 +7,8 @@
 3. 单次任务执行与结果实时预览
 4. 批量任务队列 (Task Queue) 系统
 5. 历史记录审计、健康检查与接口文档导出
+6. 任务追踪与记忆存储
+7. 工作流编排
 """
 
 from __future__ import annotations
@@ -15,14 +17,25 @@ import asyncio
 import copy
 import json
 import socket
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Tuple, TYPE_CHECKING
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent))
 
 if TYPE_CHECKING:
     import gradio as gr
 
 import main as core
+
+# Import new services
+from src.services.task_tracker import TaskTracker
+from src.services.memory_store import MemoryStore, SessionManager
+from src.services.workflow import WorkflowEngine
+from src.services.monitor import Monitor
 
 
 # --- Task Queue System (批量任务队列系统) ---
@@ -38,9 +51,56 @@ class QueueItem:
     status: str = "等待中"  # 等待中 / 执行中 / 执行成功 / 执行失败
     result: str = ""
     added_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    task_id: str = ""  # Reference to TaskTracker task ID
 
 TASK_QUEUE: List[QueueItem] = []
 _QUEUE_LOCK = None
+
+# --- New Service Instances ---
+_task_tracker: TaskTracker = None
+_memory_store: MemoryStore = None
+_session_manager: SessionManager = None
+_workflow_engine: WorkflowEngine = None
+_monitor: Monitor = None
+
+def _get_task_tracker() -> TaskTracker:
+    """Get or create TaskTracker instance."""
+    global _task_tracker
+    if _task_tracker is None:
+        _task_tracker = TaskTracker()
+    return _task_tracker
+
+def _get_memory_store() -> MemoryStore:
+    """Get or create MemoryStore instance."""
+    global _memory_store
+    if _memory_store is None:
+        _memory_store = MemoryStore()
+    return _memory_store
+
+def _get_session_manager() -> SessionManager:
+    """Get or create SessionManager instance."""
+    global _session_manager
+    if _session_manager is None:
+        _session_manager = SessionManager(_get_memory_store())
+    return _session_manager
+
+def _get_workflow_engine() -> WorkflowEngine:
+    """Get or create WorkflowEngine instance."""
+    global _workflow_engine
+    if _workflow_engine is None:
+        _workflow_engine = WorkflowEngine()
+        # Register predefined workflows
+        from src.services.workflow import create_summary_workflow, create_translation_workflow
+        _workflow_engine.register_workflow(create_summary_workflow())
+        _workflow_engine.register_workflow(create_translation_workflow())
+    return _workflow_engine
+
+def _get_monitor() -> Monitor:
+    """Get or create Monitor instance."""
+    global _monitor
+    if _monitor is None:
+        _monitor = Monitor()
+    return _monitor
 
 def get_queue_lock():
     """获取队列操作的异步锁，确保线程/并发安全"""
@@ -153,38 +213,78 @@ def _provider_guide_text(provider_label: str) -> str:
 
 def _build_api_doc_text() -> str:
     lines = [
-        "Chorus-WebAI | 网页 AI 协同引擎 接口文档",
+        "Chorus-WebAI | 网页 AI 协同引擎 v2.3 接口文档",
         "",
-        "--- 核心架构特性 ---",
+        "=== 核心架构特性 ===",
         "1. 多模型接力 (Relay)：支持使用 {prev_result} 引用前序任务输出",
         "2. 语义锚点 (Anchor)：内置 A11y 降级定位策略，增强对 UI 改版的抗性",
         "3. 视觉证据链 (Evidence)：自动记录错误现场快照与黑匣子日志",
+        "4. 故障自愈 (Recovery)：线性回退重试 + 本地 Ollama 降级",
         "",
-        "--- 功能事件列表 ---",
-        "1 应用平台预设 事件 应用平台预设",
-        "2 保存参数 事件 保存参数",
-        "3 打开登录浏览器 事件 打开登录浏览器",
-        "4 登录完成检查 事件 登录完成检查",
-        "5 执行冒烟测试 事件 执行冒烟测试",
-        "6 一键准备 事件 一键准备",
-        "7 开始执行 事件 开始执行",
-        "8 复用上次输入 事件 复用上次输入",
-        "9 导出结果 事件 导出结果",
-        "10 刷新历史 事件 刷新历史",
-        "11 清空历史 事件 清空历史",
-        "12 健康检查 事件 健康检查",
-        "13 查看最近错误日志 事件 查看最近错误日志",
+        "=== v2.3 新特性 ===",
+        "5. 任务追踪 (TaskTracker)：完整生命周期管理、事件监听、依赖解析",
+        "6. 记忆存储 (MemoryStore)：多会话管理、上下文窗口、消息搜索",
+        "7. 工作流引擎 (Workflow)：DAG编排、条件分支、并行执行",
+        "8. 监控告警 (Monitor)：指标收集、健康检查、告警管理",
         "",
-        "平台支持",
+        "=== 功能事件列表 ===",
+        "",
+        "-- 平台与配置 --",
+        "1. 应用平台预设 - 切换目标 AI 平台",
+        "2. 保存参数 - 持久化配置到 config.json",
+        "3. 打开登录浏览器 - 启动持久化浏览器会话",
+        "4. 登录完成检查 - 验证登录状态并保存会话",
+        "5. 执行冒烟测试 - 发送测试消息验证链路",
+        "6. 一键准备 - 自动执行初始化流程",
+        "",
+        "-- 任务执行 --",
+        "7. 开始执行 - 发送任务并等待响应",
+        "8. 复用上次输入 - 快速填充历史输入",
+        "9. 导出结果 - 保存响应为 MD/TXT 文件",
+        "",
+        "-- 批量队列 --",
+        "10. 加入队列 - 添加任务到批量队列",
+        "11. 执行首项 - 处理队列首个任务",
+        "12. 清空队列 - 移除所有待处理任务",
+        "",
+        "-- 工作流引擎 --",
+        "13. 查看工作流详情 - 显示步骤和依赖",
+        "14. 执行工作流 - 运行完整工作流",
+        "",
+        "-- 记忆存储 --",
+        "15. 创建会话 - 新建对话会话",
+        "16. 切换会话 - 切换到指定会话",
+        "17. 查看上下文 - 显示会话历史",
+        "",
+        "-- 监控面板 --",
+        "18. 刷新仪表盘 - 获取系统状态",
+        "19. 任务统计 - 查看执行统计",
+        "20. 健康检查 - 系统组件状态",
+        "",
+        "-- 历史与诊断 --",
+        "21. 刷新历史 - 同步任务记录",
+        "22. 清空历史 - 清除所有记录",
+        "23. 健康检查 - 完整系统诊断",
+        "24. 查看错误日志 - 显示最近异常",
+        "",
+        "=== 平台支持 ===",
     ]
     for p in PROVIDERS.values():
         lines.append(f"- {p['label']} {p['url']} 发送方式 {p['send_mode']}")
     lines.extend(
         [
             "",
-            "说明",
+            "=== 模块结构 (src/) ===",
+            "core/        - 核心引擎 (config, browser, exceptions)",
+            "models/      - 数据模型 (task, session, history)",
+            "services/    - 业务服务 (task_tracker, memory_store, workflow, monitor)",
+            "utils/       - 工具函数 (cache, helpers)",
+            "",
+            "=== 说明 ===",
             "本工具通过浏览器自动化与网页 AI 交互",
-            "登录 验证码 风控等步骤需用户人工配合",
+            "登录、验证码、风控等步骤需用户人工配合",
+            "",
+            "详细使用指南请参阅: docs/USER_GUIDE.md",
         ]
     )
     return "\n".join(lines)
@@ -299,6 +399,15 @@ def _latest_errors() -> str:
 
 def _health_check() -> str:
     cfg = core.load_config()
+    
+    # Get task statistics from tracker
+    tracker = _get_task_tracker()
+    task_stats = tracker.get_statistics()
+    
+    # Get memory statistics
+    memory = _get_memory_store()
+    memory_stats = memory.get_statistics()
+    
     status = {
         "状态目录": str(core.STATE_DIR),
         "登录目录存在": core.PROFILE_DIR.exists(),
@@ -309,6 +418,9 @@ def _health_check() -> str:
         "发送前确认": cfg.get("confirm_before_send"),
         "重试次数": cfg.get("max_retries"),
         "当前平台": cfg.get("provider_key", "deepseek"),
+        # New metrics
+        "任务统计": task_stats,
+        "内存统计": memory_stats,
     }
     return json.dumps(status, ensure_ascii=False, indent=2)
 
@@ -547,12 +659,26 @@ async def _add_to_queue(template_label: str, user_input: str) -> str:
     async with get_queue_lock():
         item = QueueItem(template_label=template_label, user_input=raw_input)
         TASK_QUEUE.append(item)
-    return f"已成功加入队列 (ID: {item.id})，当前队列长度: {len(TASK_QUEUE)}"
+        
+        # Create task in tracker
+        tracker = _get_task_tracker()
+        template_key = TEMPLATE_LABEL_TO_KEY.get(template_label, "custom")
+        task = await tracker.create_task(
+            template_key=template_key,
+            user_input=raw_input,
+            prompt=core.build_prompt(template_key, raw_input),
+        )
+        item.task_id = task.id
+        
+    return f"已成功加入队列 (ID: {item.id}, TaskID: {task.id})，当前队列长度: {len(TASK_QUEUE)}"
 
 def _render_queue_table() -> List[List[Any]]:
     return [[item.id, item.added_at, item.template_label, item.user_input[:20], item.status, item.result[:30]] for item in TASK_QUEUE]
 
 async def _process_queue_once():
+    tracker = _get_task_tracker()
+    monitor = _get_monitor()
+    
     async with get_queue_lock():
         pending = [item for item in TASK_QUEUE if item.status == "等待中"]
         if not pending:
@@ -565,17 +691,20 @@ async def _process_queue_once():
         # 提取前序任务结果 (如果有的话)
         prev_result = ""
         if current_idx > 0:
-            # 仅在明确引用时才注入
             prev_result = str(TASK_QUEUE[current_idx - 1].result)
         
         target.status = "执行中"
+        
+        # Update task tracker
+        if target.task_id:
+            await tracker.start_task(target.task_id)
     
     cfg = core.load_config()
     run_cfg = copy.deepcopy(cfg)
     run_cfg["confirm_before_send"] = False
     template_key = TEMPLATE_LABEL_TO_KEY.get(target.template_label, "custom")
     
-    # 动态注入前序结果 (处理可能存在的 Null 或异常)
+    # 动态注入前序结果
     processed_input = target.user_input.replace("{prev_result}", prev_result)
     prompt = core.build_prompt(template_key, processed_input)
 
@@ -593,10 +722,22 @@ async def _process_queue_once():
         target.status = "执行成功"
         target.result = response
         ok = True
+        
+        # Complete task in tracker
+        if target.task_id:
+            await tracker.complete_task(target.task_id, response)
+            monitor.record_task_execution(True, time.time() - started, template_key)
+            
     except Exception as exc:
         target.status = "执行失败"
         target.result = f"Error: {exc}"
         ok = False
+        
+        # Fail task in tracker
+        if target.task_id:
+            await tracker.fail_task(target.task_id, str(exc))
+            monitor.record_task_execution(False, time.time() - started, template_key)
+            
     finally:
         elapsed = round(time.time() - started, 2)
         core.append_history(
@@ -608,6 +749,7 @@ async def _process_queue_once():
                 "duration_seconds": elapsed,
                 "ok": ok,
                 "error": str(target.result) if not ok else "",
+                "task_id": target.task_id,
             }
         )
     return f"任务 {target.id} 已处理完毕 ({target.status})", _render_queue_table()
@@ -616,6 +758,126 @@ async def _clear_queue():
     async with get_queue_lock():
         TASK_QUEUE.clear()
     return "队列已清空", _render_queue_table()
+
+# --- New Features: Task Statistics & Workflow Management ---
+
+def _get_task_statistics() -> str:
+    """Get task statistics from TaskTracker."""
+    tracker = _get_task_tracker()
+    stats = tracker.get_statistics()
+    return json.dumps(stats, ensure_ascii=False, indent=2)
+
+def _get_memory_statistics() -> str:
+    """Get memory/session statistics."""
+    store = _get_memory_store()
+    stats = store.get_statistics()
+    return json.dumps(stats, ensure_ascii=False, indent=2)
+
+def _get_dashboard_data() -> str:
+    """Get comprehensive dashboard data."""
+    monitor = _get_monitor()
+    data = monitor.get_dashboard_data()
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+def _list_workflows() -> List[str]:
+    """List available workflow templates."""
+    engine = _get_workflow_engine()
+    workflows = engine.list_workflows()
+    return [f"{w.name} ({w.id})" for w in workflows]
+
+def _get_workflow_details(workflow_name: str) -> str:
+    """Get details of a specific workflow."""
+    engine = _get_workflow_engine()
+    workflows = engine.list_workflows()
+    
+    for w in workflows:
+        if w.name in workflow_name or w.id in workflow_name:
+            steps_info = []
+            for step in w.steps:
+                steps_info.append(f"  - {step.name} ({step.step_type.value})")
+            
+            return f"""Workflow: {w.name}
+ID: {w.id}
+Version: {w.version}
+Description: {w.description}
+
+Steps:
+""" + "\n".join(steps_info)
+    
+    return "Workflow not found"
+
+async def _execute_workflow(workflow_name: str, user_input: str) -> Tuple[str, str]:
+    """Execute a workflow with user input."""
+    engine = _get_workflow_engine()
+    workflows = engine.list_workflows()
+    
+    workflow = None
+    for w in workflows:
+        if w.name in workflow_name or w.id in workflow_name:
+            workflow = w
+            break
+    
+    if not workflow:
+        return "Workflow not found", ""
+    
+    # Execute with context
+    context = {"user_input": user_input}
+    
+    try:
+        execution = await engine.execute(workflow.id, context)
+        
+        if execution.state.value == "completed":
+            # Get last step result
+            last_result = list(execution.step_results.values())[-1] if execution.step_results else ""
+            return f"Workflow completed successfully. Execution ID: {execution.id}", str(last_result)[:2000]
+        else:
+            return f"Workflow {execution.state.value}: {execution.error}", ""
+    except Exception as e:
+        return f"Workflow execution failed: {e}", ""
+
+# --- Session Memory Functions ---
+
+def _create_session(title: str) -> Tuple[str, List[List[Any]]]:
+    """Create a new session."""
+    manager = _get_session_manager()
+    session = manager._store.create_session(title=title)
+    manager._store.set_current_session(session.id)
+    # Return success message and updated session list
+    sessions = manager.list_sessions()
+    session_list = [[s.id, s.title, s.message_count, s.state.value, s.updated_at.strftime("%Y-%m-%d %H:%M")] for s in sessions]
+    return f"Session created: {session.id}", session_list
+
+def _list_sessions() -> List[List[Any]]:
+    """List all sessions."""
+    manager = _get_session_manager()
+    sessions = manager.list_sessions()
+    return [[s.id, s.title, s.message_count, s.state.value, s.updated_at.strftime("%Y-%m-%d %H:%M")] for s in sessions]
+
+def _get_session_context(session_id: str) -> str:
+    """Get context from a session."""
+    if not session_id or not session_id.strip():
+        return "Please enter a session ID"
+    store = _get_memory_store()
+    context = store.get_context(session_id.strip())
+    if not context:
+        return "No messages in session or session not found"
+    return "\n".join([f"[{m['role']}]: {m['content'][:200]}{'...' if len(m['content']) > 200 else ''}" for m in context])
+
+def _switch_session(session_id: str) -> Tuple[str, str]:
+    """Switch to a different session."""
+    if not session_id or not session_id.strip():
+        return "Please enter a session ID", ""
+    manager = _get_session_manager()
+    if manager.switch_session(session_id.strip()):
+        context = _get_session_context(session_id.strip())
+        return f"Switched to session: {session_id}", context
+    return f"Failed to switch to session: {session_id}", ""
+
+def _get_memory_statistics() -> str:
+    """Get memory/session statistics."""
+    store = _get_memory_store()
+    stats = store.get_statistics()
+    return json.dumps(stats, ensure_ascii=False, indent=2)
 
 def build_ui() -> gr.Blocks:
     import gradio as gr
@@ -749,6 +1011,58 @@ def build_ui() -> gr.Blocks:
                         clear_history_btn = gr.Button("清空记录", elem_classes=["action-secondary"])
                     diag_box = gr.Textbox(label="控制台输出", lines=10, elem_classes=["provider-card"])
 
+            # New Tab: Workflow Engine
+            with gr.Tab("🔄 工作流引擎"):
+                with gr.Group(elem_classes=["section-card"]):
+                    gr.Markdown("<div class='section-title'>工作流模板</div>")
+                    with gr.Row():
+                        workflow_select = gr.Dropdown(choices=_list_workflows(), label="选择工作流")
+                        workflow_info_btn = gr.Button("查看详情", elem_classes=["action-secondary"])
+                    workflow_details = gr.Textbox(label="工作流详情", lines=6, interactive=False)
+                
+                with gr.Group(elem_classes=["section-card"]):
+                    gr.Markdown("<div class='section-title'>执行工作流</div>")
+                    workflow_input = gr.Textbox(label="输入内容", lines=4, placeholder="输入工作流所需的内容...")
+                    with gr.Row():
+                        workflow_run_btn = gr.Button("▶ 执行工作流", elem_classes=["action-primary"])
+                        workflow_status = gr.Textbox(label="执行状态", lines=1)
+                    workflow_result = gr.Textbox(label="执行结果", lines=10)
+
+            # New Tab: Memory & Sessions
+            with gr.Tab("💾 记忆存储"):
+                with gr.Group(elem_classes=["section-card"]):
+                    gr.Markdown("<div class='section-title'>会话管理</div>")
+                    with gr.Row():
+                        session_title = gr.Textbox(label="新会话标题", scale=2)
+                        create_session_btn = gr.Button("创建会话", elem_classes=["action-primary"])
+                    session_list = gr.Dataframe(headers=["ID", "标题", "消息数", "状态", "更新时间"], interactive=False)
+                    with gr.Row():
+                        refresh_sessions_btn = gr.Button("刷新列表", elem_classes=["action-secondary"])
+                        switch_session_input = gr.Textbox(label="切换到会话ID")
+                        switch_session_btn = gr.Button("切换会话", elem_classes=["action-secondary"])
+                
+                with gr.Group(elem_classes=["section-card"]):
+                    gr.Markdown("<div class='section-title'>会话上下文</div>")
+                    session_context_btn = gr.Button("查看当前上下文", elem_classes=["action-secondary"])
+                    session_context = gr.Textbox(label="对话历史", lines=8, interactive=False)
+                    memory_stats = gr.Textbox(label="内存统计", lines=3)
+
+            # New Tab: Monitoring Dashboard
+            with gr.Tab("📈 监控面板"):
+                with gr.Group(elem_classes=["section-card"]):
+                    gr.Markdown("<div class='section-title'>系统监控</div>")
+                    with gr.Row():
+                        dashboard_refresh_btn = gr.Button("刷新仪表盘", elem_classes=["action-primary"])
+                        task_stats_btn = gr.Button("任务统计", elem_classes=["action-secondary"])
+                    dashboard_data = gr.Textbox(label="仪表盘数据", lines=15)
+                
+                with gr.Group(elem_classes=["section-card"]):
+                    gr.Markdown("<div class='section-title'>性能指标</div>")
+                    with gr.Row():
+                        metrics_health_btn = gr.Button("健康检查", elem_classes=["action-secondary"])
+                        metrics_tasks_btn = gr.Button("任务指标", elem_classes=["action-secondary"])
+                    metrics_display = gr.Textbox(label="性能数据", lines=10)
+
         with gr.Tab("帮助文档"):
             with gr.Group(elem_classes=["section-card"]):
                 gr.Markdown("<div class='section-title'>接口文档与使用指引</div>")
@@ -794,6 +1108,21 @@ def build_ui() -> gr.Blocks:
         health_btn.click(fn=_health_check, outputs=[diag_box])
         error_btn.click(fn=_latest_errors, outputs=[diag_box])
 
+        # Workflow Engine event handlers
+        workflow_info_btn.click(fn=_get_workflow_details, inputs=[workflow_select], outputs=[workflow_details])
+        workflow_run_btn.click(fn=_execute_workflow, inputs=[workflow_select, workflow_input], outputs=[workflow_status, workflow_result])
+
+        # Memory & Sessions event handlers
+        create_session_btn.click(fn=_create_session, inputs=[session_title], outputs=[session_context, session_list])
+        refresh_sessions_btn.click(fn=_list_sessions, outputs=[session_list])
+        switch_session_btn.click(fn=_switch_session, inputs=[switch_session_input], outputs=[session_context, session_context])
+        session_context_btn.click(fn=_get_session_context, inputs=[switch_session_input], outputs=[session_context])
+        
+        # Monitoring Dashboard event handlers
+        dashboard_refresh_btn.click(fn=_get_dashboard_data, outputs=[dashboard_data])
+        task_stats_btn.click(fn=_get_task_statistics, outputs=[dashboard_data])
+        metrics_health_btn.click(fn=_get_dashboard_data, outputs=[metrics_display])
+        metrics_tasks_btn.click(fn=_get_task_statistics, outputs=[metrics_display])
 
         q_add_btn.click(fn=_add_to_queue, inputs=[q_template, q_input], outputs=[q_add_status])
         q_refresh_btn.click(fn=_render_queue_table, outputs=[q_grid])
@@ -820,6 +1149,9 @@ def build_ui() -> gr.Blocks:
             ],
         )
         demo.load(fn=_history_table, inputs=[history_filter], outputs=[history_grid])
+        demo.load(fn=_list_sessions, outputs=[session_list])
+        demo.load(fn=_get_dashboard_data, outputs=[dashboard_data])
+        demo.load(fn=_get_memory_statistics, outputs=[memory_stats])
 
         gr.HTML(
             """
