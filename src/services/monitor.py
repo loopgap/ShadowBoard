@@ -405,9 +405,9 @@ class Monitor:
     Combines metrics collection, alerting, and health checks.
     """
 
-    def __init__(self) -> None:
-        self.metrics = MetricsCollector()
-        self.alerts = AlertManager()
+    def __init__(self, state_dir: Optional[Path] = None) -> None:
+        self.metrics = MetricsCollector(state_dir=state_dir)
+        self.alerts = AlertManager(state_dir=state_dir)
         self._health_checks: Dict[str, Callable[[], HealthStatus]] = {}
 
     def register_health_check(

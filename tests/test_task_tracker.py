@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import pytest
-import tempfile
 from pathlib import Path
 
 import sys
@@ -17,16 +16,9 @@ from src.models.task import TaskStatus, TaskPriority
 
 
 @pytest.fixture
-def temp_db():
-    """Create a temporary database for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
-
-
-@pytest.fixture
-def tracker(temp_db):
+def tracker(tmp_path):
     """Create a TaskTracker instance with temporary database."""
-    return TaskTracker(state_dir=temp_db)
+    return TaskTracker(state_dir=tmp_path)
 
 
 def test_create_task(tracker):
@@ -40,9 +32,8 @@ def test_create_task(tracker):
         assert task.id is not None
         assert task.template_key == "summary"
         assert task.status == TaskStatus.PENDING
-        return task
 
-    return asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_task_lifecycle(tracker):

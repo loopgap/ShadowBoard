@@ -18,21 +18,14 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install dependencies
-        shell: bash
-        run: |
-          python -m venv .venv
-          ./.venv/Scripts/python.exe -m pip install --upgrade pip
-          ./.venv/Scripts/pip.exe install -r requirements.txt
-          ./.venv/Scripts/pip.exe install ruff pytest pytest-asyncio
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
 
-      - name: Install Playwright Browsers
-        shell: bash
-        run: |
-          ./.venv/Scripts/python.exe -m playwright install chromium
-
-      - name: Run Quality Gate (Lint, Test, Perf)
+      - name: Run ShadowBoard Setup and Quality Gate
         shell: pwsh
         run: |
-          # PowerShell 质量门禁脚本现在已经内部处理了 stderr 异常情况
-          .\quality_gate.ps1
+          # The Go runner handles venv creation, pip installs, and playwright install
+          go run sb.go setup
+          go run sb.go check

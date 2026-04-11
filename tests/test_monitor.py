@@ -5,7 +5,6 @@ Tests for Monitoring Service
 from __future__ import annotations
 
 import pytest
-import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -22,28 +21,21 @@ from src.services.monitor import (
 
 
 @pytest.fixture
-def temp_db():
-    """Create a temporary database for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
-
-
-@pytest.fixture
-def metrics(temp_db):
+def metrics(tmp_path):
     """Create a MetricsCollector instance."""
-    return MetricsCollector(state_dir=temp_db)
+    return MetricsCollector(state_dir=tmp_path)
 
 
 @pytest.fixture
-def alerts(temp_db):
+def alerts(tmp_path):
     """Create an AlertManager instance."""
-    return AlertManager(state_dir=temp_db)
+    return AlertManager(state_dir=tmp_path)
 
 
 @pytest.fixture
-def monitor():
+def monitor(tmp_path):
     """Create a Monitor instance."""
-    return Monitor()
+    return Monitor(state_dir=tmp_path)
 
 
 # MetricsCollector Tests

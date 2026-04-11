@@ -1,7 +1,7 @@
 """
-Tests for Core Logic (Updated for v2.3 Modular Architecture)
+Tests for Core Logic (Updated for v3.0 ShadowBoard Architecture)
 
-These tests are updated to work with the new service-based architecture.
+These tests verify the core engine functionality.
 """
 
 from __future__ import annotations
@@ -9,8 +9,6 @@ from __future__ import annotations
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from pathlib import Path
-import tempfile
 import json
 import os
 
@@ -18,159 +16,153 @@ import main
 
 
 def test_build_prompt():
-    assert "Summarize" in main.build_prompt("summary", "abc")
-    assert "Translate" in main.build_prompt("translation", "abc")
+    assert "ShadowBoard" in main.build_prompt("market_analyst", "abc")
+    assert "ShadowBoard" in main.build_prompt("tech_lead", "abc")
     assert main.build_prompt("custom", "direct") == "direct"
 
 
-def test_load_save_config():
+def test_load_save_config(tmp_path):
     """Test config loading with the new ConfigManager."""
     from src.core.config import ConfigManager
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / "config.json"
-        manager = ConfigManager(config_path=config_path, state_dir=Path(tmpdir))
-        
-        # Test default
-        cfg = manager.get_all()
-        assert cfg["target_url"] == "https://chat.deepseek.com/"
-        
-        # Test save and load
-        manager.set("target_url", "https://example.com")
-        cfg2 = manager.get_all()
-        assert cfg2["target_url"] == "https://example.com"
+    tmpdir = tmp_path
+    config_path = tmpdir / "config.json"
+    manager = ConfigManager(config_path=config_path, state_dir=tmpdir)
+    
+    # Test default
+    cfg = manager.get_all()
+    assert cfg["target_url"] == "https://chat.deepseek.com/"
+    
+    # Test save and load
+    manager.set("target_url", "https://example.com")
+    cfg2 = manager.get_all()
+    assert cfg2["target_url"] == "https://example.com"
 
 
-def test_load_config_corrupted():
+def test_load_config_corrupted(tmp_path):
     """Test config loading with corrupted file raises ConfigError."""
     from src.core.exceptions import ConfigError
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state_dir = Path(tmpdir) / "state"
-        state_dir.mkdir()
-        config_path = state_dir / "config.json"
-        
-        # Write corrupted content
-        config_path.write_text("{invalid json content", encoding="utf-8")
-        
-        # Create a temporary manager instance (bypassing singleton)
-        from src.core.config import ConfigManager
-        manager = object.__new__(ConfigManager)
-        manager._state_dir = state_dir
-        manager._config_path = config_path
-        manager._providers = {}
-        manager._config = {}
-        manager._listeners = []
-        
-        # Test that corrupted config raises ConfigError
-        with pytest.raises(ConfigError) as exc_info:
-            manager._load_config()
-        
-        # Verify the error message
-        assert "corrupted" in str(exc_info.value).lower()
-
-
-def test_load_config_empty_file():
-    """Test config loading with empty file returns defaults."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state_dir = Path(tmpdir) / "state"
-        state_dir.mkdir()
-        config_path = state_dir / "config.json"
-        
-        # Write empty content
-        config_path.write_text("", encoding="utf-8")
-        
-        # Create a temporary manager instance (bypassing singleton)
-        from src.core.config import ConfigManager, DEFAULT_CONFIG
-        manager = object.__new__(ConfigManager)
-        manager._state_dir = state_dir
-        manager._config_path = config_path
-        manager._providers = {}
-        manager._config = {}
-        manager._listeners = []
-        
-        # Test that empty config returns defaults
-        loaded_config = manager._load_config()
-        assert loaded_config["target_url"] == DEFAULT_CONFIG["target_url"]
-
-
-def test_history_ops():
-    """Test history operations with file-based storage."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    config_path = state_dir / "config.json"
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        hist_file = Path(tmpdir) / "history.jsonl"
-        
-        # Write entries directly
-        entry1 = {"ok": True, "time": "now"}
-        entry2 = {"ok": False, "time": "later"}
-        hist_file.write_text(json.dumps(entry1) + "\n" + json.dumps(entry2) + "\n", encoding="utf-8")
-        
-        # Read using the main module's function with patched path
-        with patch.object(main, 'HISTORY_PATH', hist_file):
-            with patch.object(main, 'get_config_manager') as mock_mgr:
-                mock_mgr.return_value.history_path = hist_file
-                rows = main.read_history(limit=10)
-                assert len(rows) == 2
-                assert rows[0]["ok"] is False
-                assert rows[1]["ok"] is True
+    # Write corrupted content
+    config_path.write_text("{invalid json content", encoding="utf-8")
+    
+    # Create a temporary manager instance (bypassing singleton)
+    from src.core.config import ConfigManager
+    manager = object.__new__(ConfigManager)
+    manager._state_dir = state_dir
+    manager._config_path = config_path
+    manager._providers = {}
+    manager._config = {}
+    manager._listeners = []
+    
+    # Test that corrupted config raises ConfigError
+    with pytest.raises(ConfigError) as exc_info:
+        manager._load_config()
+    
+    # Verify the error message
+    assert "corrupted" in str(exc_info.value).lower()
 
 
-def test_read_history_corrupted():
+def test_load_config_empty_file(tmp_path):
+    """Test config loading with empty file returns defaults."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    config_path = state_dir / "config.json"
+    
+    # Write empty content
+    config_path.write_text("", encoding="utf-8")
+    
+    # Create a temporary manager instance (bypassing singleton)
+    from src.core.config import ConfigManager, DEFAULT_CONFIG
+    manager = object.__new__(ConfigManager)
+    manager._state_dir = state_dir
+    manager._config_path = config_path
+    manager._providers = {}
+    manager._config = {}
+    manager._listeners = []
+    
+    # Test that empty config returns defaults
+    loaded_config = manager._load_config()
+    assert loaded_config["target_url"] == DEFAULT_CONFIG["target_url"]
+
+
+def test_history_ops(tmp_path):
+    """Test history operations with file-based storage."""
+    tmpdir = tmp_path
+    history_path = tmpdir / "history.jsonl"
+    
+    # Write entries directly
+    entry1 = {"ok": True, "time": "now", "template": "custom"}
+    entry2 = {"ok": False, "time": "later", "template": "custom"}
+    history_path.write_text(json.dumps(entry1) + "\n" + json.dumps(entry2) + "\n", encoding="utf-8")
+    
+    # Read using the main module's function with patched path
+    with patch.object(main, 'HISTORY_PATH', history_path):
+        with patch.object(main, 'get_config_manager') as mock_mgr:
+            mock_mgr.return_value.history_path = history_path
+            rows = main.read_history(limit=10)
+            assert len(rows) == 2
+            assert rows[0]["ok"] is False
+            assert rows[1]["ok"] is True
+
+
+def test_read_history_corrupted(tmp_path):
     """Test reading history with corrupted lines."""
     # Test the underlying read_history function logic directly
-    with tempfile.TemporaryDirectory() as tmpdir:
-        hist_file = Path(tmpdir) / "history.jsonl"
-        # Write valid and invalid lines
-        hist_file.write_text('{"valid": true}\ninvalid line\n{"valid": false}', encoding="utf-8")
+    hist_file = tmp_path / "history.jsonl"
+    # Write valid and invalid lines
+    hist_file.write_text('{"valid": true}\ninvalid line\n{"valid": false}', encoding="utf-8")
+    
+    # Use the core read logic directly
+    rows = []
+    chunk_size = 4096
+    
+    with hist_file.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        buffer = bytearray()
+        pointer = file_size
         
-        # Use the core read logic directly
-        import os
-        rows = []
-        chunk_size = 4096
-        
-        with hist_file.open("rb") as f:
-            f.seek(0, os.SEEK_END)
-            file_size = f.tell()
-            buffer = bytearray()
-            pointer = file_size
+        while pointer > 0 and len(rows) < 10:
+            step = min(pointer, chunk_size)
+            pointer -= step
+            f.seek(pointer)
+            new_chunk = f.read(step)
+            buffer = new_chunk + buffer
             
-            while pointer > 0 and len(rows) < 10:
-                step = min(pointer, chunk_size)
-                pointer -= step
-                f.seek(pointer)
-                new_chunk = f.read(step)
-                buffer = new_chunk + buffer
+            lines = buffer.splitlines()
+            if pointer > 0:
+                buffer = lines[0]
+                to_process = lines[1:]
+            else:
+                buffer = bytearray()
+                to_process = lines
                 
-                lines = buffer.splitlines()
-                if pointer > 0:
-                    buffer = lines[0]
-                    to_process = lines[1:]
-                else:
-                    buffer = bytearray()
-                    to_process = lines
-                    
-                for line in reversed(to_process):
-                    if not line.strip():
-                        continue
-                    try:
-                        rows.append(json.loads(line.decode("utf-8")))
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        continue
-        
-        assert len(rows) == 2  # skipped invalid line
-        assert rows[0]["valid"] is False  # Most recent first
-        assert rows[1]["valid"] is True
+            for line in reversed(to_process):
+                if not line.strip():
+                    continue
+                try:
+                    rows.append(json.loads(line.decode("utf-8")))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+    
+    assert len(rows) == 2  # skipped invalid line
+    assert rows[0]["valid"] is False  # Most recent first
+    assert rows[1]["valid"] is True
 
 
-def test_read_history_empty():
+def test_read_history_empty(tmp_path):
     """Test reading from nonexistent history file."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        hist_file = Path(tmpdir) / "nonexistent.jsonl"
-        
-        with patch.object(main, 'HISTORY_PATH', hist_file):
-            rows = main.read_history(limit=10)
-            # Should return empty list for nonexistent file
-            assert rows == []
+    hist_file = tmp_path / "nonexistent.jsonl"
+    
+    with patch.object(main, 'HISTORY_PATH', hist_file):
+        rows = main.read_history(limit=10)
+        # Should return empty list for nonexistent file
+        assert rows == []
 
 
 @pytest.mark.asyncio
@@ -287,20 +279,17 @@ async def test_send_with_retry_exhausted(monkeypatch):
 
 # ============== Tests for new services ==============
 
-def test_task_tracker_basic():
-    """Test TaskTracker basic functionality without temp directory cleanup."""
+def test_task_tracker_basic(tmp_path):
+    """Test TaskTracker basic functionality."""
     from src.services.task_tracker import TaskTracker
     from src.models.task import TaskStatus
     
-    # Use a fixed temp path
-    tmpdir = Path(os.environ.get('TEMP', '/tmp')) / 'shadowboard_test_tracker'
-    tmpdir.mkdir(exist_ok=True)
-    
+    tmpdir = tmp_path
     tracker = TaskTracker(state_dir=tmpdir)
     
     async def run_test():
         task = await tracker.create_task(
-            template_key="summary",
+            template_key="custom",
             user_input="Test input"
         )
         assert task.status == TaskStatus.PENDING
@@ -314,22 +303,13 @@ def test_task_tracker_basic():
         assert completed.status == TaskStatus.COMPLETED
     
     asyncio.run(run_test())
-    
-    # Cleanup
-    try:
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
-    except Exception:
-        pass
 
 
-def test_memory_store_basic():
+def test_memory_store_basic(tmp_path):
     """Test MemoryStore basic functionality."""
     from src.services.memory_store import MemoryStore
     
-    tmpdir = Path(os.environ.get('TEMP', '/tmp')) / 'shadowboard_test_memory'
-    tmpdir.mkdir(exist_ok=True)
-    
+    tmpdir = tmp_path
     store = MemoryStore(state_dir=tmpdir)
     
     session = store.create_session(title="Test Session")
@@ -339,13 +319,6 @@ def test_memory_store_basic():
     context = store.get_context(session.id)
     assert len(context) == 1
     assert context[0]["content"] == "Hello!"
-    
-    # Cleanup
-    try:
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
-    except Exception:
-        pass
 
 
 def test_workflow_engine_basic():

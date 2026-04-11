@@ -5,7 +5,6 @@ Tests for Memory Storage Service
 from __future__ import annotations
 
 import pytest
-import tempfile
 from pathlib import Path
 
 import sys
@@ -16,16 +15,9 @@ from src.models.session import SessionState
 
 
 @pytest.fixture
-def temp_db():
-    """Create a temporary database for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
-
-
-@pytest.fixture
-def store(temp_db):
+def store(tmp_path):
     """Create a MemoryStore instance with temporary database."""
-    return MemoryStore(state_dir=temp_db)
+    return MemoryStore(state_dir=tmp_path)
 
 
 @pytest.fixture

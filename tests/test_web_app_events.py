@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -81,9 +82,21 @@ def test_latest_errors(tmp_path, monkeypatch):
 def test_health_check(monkeypatch):
     monkeypatch.setattr(web_app, "_profile_has_login_data", lambda: True)
     monkeypatch.setattr(web_app.core, "load_config", lambda: {"target_url": "u", "confirm_before_send": True, "max_retries": 3, "provider_key": "deepseek"})
+    
+    # Mock services to avoid real DB access
+    mock_tracker = MagicMock()
+    mock_tracker.get_statistics.return_value = {"total_tasks": 0}
+    monkeypatch.setattr(web_app, "_get_task_tracker", lambda: mock_tracker)
+    
+    mock_memory = MagicMock()
+    mock_memory.get_statistics.return_value = {"total_sessions": 0}
+    monkeypatch.setattr(web_app, "_get_memory_store", lambda: mock_memory)
+    
     out = web_app._health_check()
     data = json.loads(out)
     assert data["目标网址"] == "u"
+    assert "任务统计" in data
+    assert "内存统计" in data
 
 
 def test_load_and_save_config(monkeypatch):
