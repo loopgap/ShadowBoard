@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
+import signal
 import socket
 import sys
 import time
@@ -476,6 +478,22 @@ def _save_config_from_form(
     return "配置已保存", _build_guide_markdown(), _provider_guide_text(provider_label)
 
 
+async def _delayed_exit(delay: float = 2.0):
+    """Wait and then terminate the process."""
+    await asyncio.sleep(delay)
+    # Use SIGTERM for graceful exit if possible, or kill
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+async def _shutdown_system() -> str:
+    """Clean up resources and shut down the server."""
+    # 1. Close any open browser sessions
+    await _close_login_session()
+    # 2. Schedule process termination
+    asyncio.create_task(_delayed_exit(2.0))
+    return "系统正在安全关闭中... 请在 2 秒后直接关闭此浏览器标签页。终端进程即将退出。"
+
+
 async def _close_login_session() -> None:
     async with get_login_lock():
         ctx = LOGIN_STATE.get("context")
@@ -908,6 +926,7 @@ def build_ui() -> gr.Blocks:
                             with gr.Row():
                                 refresh_guide_btn = gr.Button("刷新进度", elem_classes=["action-secondary"])
                                 one_click_btn = gr.Button("一键初始化董事会环境", elem_classes=["action-primary"])
+                                shutdown_btn = gr.Button("🛑 安全关闭系统 (Shutdown)", variant="stop")
                     
                     with gr.Column(scale=1):
                         with gr.Group(elem_classes=["section-card"]):
@@ -1088,6 +1107,7 @@ def build_ui() -> gr.Blocks:
         finish_login_btn.click(fn=_finish_login_check, outputs=[setup_status, guide_markdown])
         smoke_btn.click(fn=_run_smoke_test, inputs=[smoke_confirm, smoke_pause], outputs=[setup_status, guide_markdown])
         one_click_btn.click(fn=_one_click_prepare, outputs=[setup_status, guide_markdown])
+        shutdown_btn.click(fn=_shutdown_system, outputs=[setup_status])
 
         template_label.change(fn=_template_help, inputs=[template_label], outputs=[template_help])
         task_input.change(fn=_input_tip, inputs=[task_input], outputs=[input_tip])
