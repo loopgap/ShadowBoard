@@ -18,14 +18,20 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Run ShadowBoard Setup and Quality Gate
-        shell: pwsh
+      - name: Install dependencies
         run: |
-          # The Go runner handles venv creation, pip installs, and playwright install
-          go run sb.go setup
-          go run sb.go check
+          python -m venv .venv
+          .venv\Scripts\Activate.ps1
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff pytest pytest-asyncio
+
+      - name: Install Playwright Browsers
+        run: |
+          .venv\Scripts\Activate.ps1
+          python -m playwright install chromium
+
+      - name: Run Quality Gate (Lint, Test, Perf)
+        run: |
+          .venv\Scripts\Activate.ps1
+          .\quality_gate.ps1

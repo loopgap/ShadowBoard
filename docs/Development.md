@@ -1,34 +1,49 @@
-# 开发与维护 (Development)
+# 开发与维护
 
-本文档面向希望扩展或自定义 ShadowBoard 的开发者。
+本文档描述当前仓库可直接使用的开发流程，内容已与现有文件对齐。
 
 ---
 
-## 🛠️ 统一管理工具 (`sb.go`)
-
-我们使用 Go 编写了一个跨平台的任务运行器，用于简化日常操作：
+## 1. 本地开发启动
 
 ```powershell
-# 环境初始化
-go run sb.go setup
+# 安装依赖（可编辑模式）
+pip install -e .
 
-# 运行 Web UI (Boardroom)
-go run sb.go web
+# 安装浏览器内核
+playwright install chromium
 
-# 执行全量质量校验 (Quality Gate)
-go run sb.go check
-
-# 仅运行单元测试
-go run sb.go test
+# 启动 Web UI
+python web_app.py
 ```
 
-## 📁 项目结构 (Structure)
+## 2. 运行测试
 
-*   `src/core/`：Playwright 自动化引擎、浏览器管理、配置解析。
-*   `src/services/`：三大核心业务服务（任务、记忆、监控）。
-*   `src/models/`：数据模型定义。
-*   `tests/`：完整的单元测试与集成测试集。
+```powershell
+# 全量测试
+pytest
+
+# 指定测试文件
+pytest tests/test_workflow.py
+
+# 性能检查
+python perf_check.py
+```
+
+## 3. 关键目录
+
+- `src/core/`: 配置、异常、浏览器管理、服务依赖。
+- `src/services/`: 工作流、任务追踪、记忆存储、监控。
+- `src/models/`: Task、Session、History 等模型。
+- `src/ui/`: Gradio 页面组装与 Tab 业务逻辑。
+- `tests/`: 单元测试与集成测试。
+
+## 4. 开发约定
+
+- 新增服务优先放在 `src/services/`，模型放在 `src/models/`。
+- 业务入口统一通过 `src/core/dependencies.py` 获取服务实例。
+- 文档变更后同步更新 [Home.md](Home.md) 的索引。
 
 ---
 
-[返回首页](Home.md)
+[返回文档中心](Home.md)

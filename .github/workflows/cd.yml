@@ -19,24 +19,19 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Install dependencies and build tools
-        shell: pwsh
+      - name: Install dependencies
         run: |
-          # Use the unified Go runner for setup
-          go run sb.go setup
-          # Install pyinstaller into the same venv
-          ./.venv/Scripts/pip.exe install pyinstaller
+          python -m venv .venv
+          .venv\Scripts\Activate.ps1
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
 
       - name: Build Executable
-        shell: pwsh
         run: |
-          # Use pyinstaller from the venv
-          ./.venv/Scripts/pyinstaller --noconfirm --onefile --windowed --add-data "README.md;." web_app.py
+          .venv\Scripts\Activate.ps1
+          # 我们把 web_app 打包成一个单文件的直接可执行程序
+          pyinstaller --noconfirm --onefile --windowed --add-data "README.md;." web_app.py
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

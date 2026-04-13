@@ -11,12 +11,15 @@ Provides centralized configuration management with:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 
 from .exceptions import ConfigError
+
+logger = logging.getLogger(__name__)
 
 
 # Default configuration values
@@ -152,11 +155,13 @@ class ConfigManager:
 
             return merged
         except json.JSONDecodeError as e:
+            logger.error(f"Configuration file is corrupted: {e} at {self._config_path}")
             raise ConfigError(
                 f"Configuration file is corrupted: {e}",
                 context={"file": str(self._config_path)},
             )
         except Exception as e:
+            logger.error(f"Failed to load configuration from {self._config_path}: {e}")
             raise ConfigError(
                 f"Failed to load configuration: {e}",
                 cause=e,

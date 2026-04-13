@@ -1,180 +1,136 @@
-"""
-网页 AI 半自动助手 - Gradio 图形界面模块 (Web UI Layer)
-
-本模块构建了一个基于 Gradio 的交互式 Web 界面，提供以下功能:
-1. 平台预设管理与参数配置
-2. 引导式登录与冒烟测试流程
-3. 单次任务执行与结果实时预览
-4. 批量任务队列 (Task Queue) 系统
-5. 历史记录审计、健康检查与接口文档导出
-6. 任务追踪与记忆存储
-7. 工作流编排
-"""
-
 from __future__ import annotations
 
 import asyncio
 import copy
 import json
-import os
-import signal
 import socket
-import sys
 import time
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Tuple
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
-
-if TYPE_CHECKING:
-    import gradio as gr
+import gradio as gr
 
 import main as core
 
-# Import new services
-from src.services.task_tracker import TaskTracker
-from src.services.memory_store import MemoryStore, SessionManager
-from src.services.workflow import WorkflowEngine
-from src.services.monitor import Monitor
 
-
-# --- Task Queue System (批量任务队列系统) ---
+# Task Queue System
 from dataclasses import dataclass, field
 import uuid
 
 @dataclass
 class QueueItem:
-    """表示队列中的单个任务项"""
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     template_label: str = ""
     user_input: str = ""
-    status: str = "等待中"  # 等待中 / 执行中 / 执行成功 / 执行失败
+    status: str = "等待中"
     result: str = ""
     added_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    task_id: str = ""  # Reference to TaskTracker task ID
 
 TASK_QUEUE: List[QueueItem] = []
 _QUEUE_LOCK = None
 
-# --- New Service Instances ---
-_task_tracker: TaskTracker = None
-_memory_store: MemoryStore = None
-_session_manager: SessionManager = None
-_workflow_engine: WorkflowEngine = None
-_monitor: Monitor = None
-
-def _get_task_tracker() -> TaskTracker:
-    """Get or create TaskTracker instance."""
-    global _task_tracker
-    if _task_tracker is None:
-        _task_tracker = TaskTracker()
-    return _task_tracker
-
-def _get_memory_store() -> MemoryStore:
-    """Get or create MemoryStore instance."""
-    global _memory_store
-    if _memory_store is None:
-        _memory_store = MemoryStore()
-    return _memory_store
-
-def _get_session_manager() -> SessionManager:
-    """Get or create SessionManager instance."""
-    global _session_manager
-    if _session_manager is None:
-        _session_manager = SessionManager(_get_memory_store())
-    return _session_manager
-
-def _get_workflow_engine() -> WorkflowEngine:
-    """Get or create WorkflowEngine instance."""
-    global _workflow_engine
-    if _workflow_engine is None:
-        _workflow_engine = WorkflowEngine()
-        # Note: Default board workflows are registered in WorkflowEngine.__init__
-    return _workflow_engine
-
-def _get_monitor() -> Monitor:
-    """Get or create Monitor instance."""
-    global _monitor
-    if _monitor is None:
-        _monitor = Monitor()
-    return _monitor
-
 def get_queue_lock():
-    """获取队列操作的异步锁，确保线程/并发安全"""
     global _QUEUE_LOCK
     if _QUEUE_LOCK is None:
         _QUEUE_LOCK = asyncio.Lock()
     return _QUEUE_LOCK
-# ------------------------------------------
+
 
 _LOGIN_LOCK = None
 def get_login_lock():
-    """获取浏览器登录会话的锁，防止同时打开多个登录窗口"""
     global _LOGIN_LOCK
     if _LOGIN_LOCK is None:
         _LOGIN_LOCK = asyncio.Lock()
     return _LOGIN_LOCK
 LOGIN_STATE: Dict[str, Any] = {"p": None, "context": None, "page": None}
-LAST_INPUT: Dict[str, str] = {"template": "市场分析 (CMO)", "content": ""}
+LAST_INPUT: Dict[str, str] = {"template": "摘要总结", "content": ""}
 
 EXPORT_DIR = core.STATE_DIR / "exports"
 DOCS_DIR = core.STATE_DIR / "docs"
 
 PROVIDERS: Dict[str, Dict[str, str]] = {
-    "deepseek": {"label": "DeepSeek", "url": "https://chat.deepseek.com/", "send_mode": "enter", "guide": "建议开启‘回车发送’。如果遇到验证码，请手动完成。"},
-    "kimi": {"label": "Kimi (Moonshot)", "url": "https://kimi.moonshot.cn/", "send_mode": "enter", "guide": "Kimi 网页版响应较快，适合长文本分析。"},
-    "tongyi": {"label": "通义千问 (Qwen)", "url": "https://tongyi.aliyun.com/", "send_mode": "button", "guide": "通义建议使用‘点击按钮’模式进行交互。"},
+    "deepseek": {
+        "label": "DeepSeek 网页",
+        "url": "https://chat.deepseek.com/",
+        "send_mode": "enter",
+        "guide": "推荐新手首选 页面稳定 先登录后做冒烟测试",
+    },
+    "kimi": {
+        "label": "Kimi 网页",
+        "url": "https://kimi.moonshot.cn/",
+        "send_mode": "enter",
+        "guide": "适合长文处理 登录后先执行一次冒烟验证",
+    },
+    "tongyi": {
+        "label": "通义千问 网页",
+        "url": "https://tongyi.aliyun.com/qianwen/",
+        "send_mode": "button",
+        "guide": "建议使用点击按钮发送 遇到弹窗先手动关闭",
+    },
+    "doubao": {
+        "label": "豆包 网页",
+        "url": "https://www.doubao.com/chat/",
+        "send_mode": "enter",
+        "guide": "登录后建议先做冒烟测试 再开始批量任务",
+    },
+    "zhipu": {
+        "label": "智谱清言 网页",
+        "url": "https://chatglm.cn/main/alltoolsdetail",
+        "send_mode": "button",
+        "guide": "建议点击按钮发送 页面改版时优先检查输入框定位",
+    },
+    "wenxin": {
+        "label": "文心一言 网页",
+        "url": "https://yiyan.baidu.com/",
+        "send_mode": "button",
+        "guide": "登录验证较严格 建议先人工完成验证后再自动执行",
+    },
 }
-PROVIDER_LABEL_TO_KEY: Dict[str, str] = {v["label"]: k for k, v in PROVIDERS.items()}
 
-_DEFAULT_TEMPLATES = {
-    "市场分析 (CMO)": {"key": "market_analyst", "guide": "从市场规模、竞争对手、用户痛点角度分析议案。"},
-    "技术评估 (CTO)": {"key": "tech_lead", "guide": "评估技术可行性、架构复杂度及核心技术栈。"},
-    "财务审计 (CFO)": {"key": "finance_expert", "guide": "进行成本收益分析，指出潜在财务风险。"},
-    "风险管理 (Red Team)": {"key": "risk_manager", "guide": "寻找法律、合规及逻辑上的致命缺陷点。"},
-    "董事长总结 (Chairman)": {"key": "chairman_summary", "guide": "阅读所有董事记录，给出最终执行/否决建议。"},
-    "自定义原样发送": {"key": "custom", "guide": "跳过角色，直接将输入内容发送给当前 AI 平台。"},
+PROVIDER_LABEL_TO_KEY = {v["label"]: k for k, v in PROVIDERS.items()}
+
+TEMPLATE_LABEL_TO_KEY: Dict[str, str] = {
+    "市场分析 (CMO)": "market_analyst",
+    "技术评估 (CTO)": "tech_lead",
+    "财务审计 (CFO)": "finance_expert",
+    "风险管理 (Red Team)": "risk_manager",
+    "董事长总结 (Chairman)": "chairman_summary",
+    "摘要总结": "summary",
+    "中英翻译": "translation",
+    "润色改写": "rewrite",
+    "信息抽取": "extract",
+    "问答助手": "qa",
+    "自定义原样发送": "custom",
 }
 
-TEMPLATE_LABEL_TO_KEY: Dict[str, str] = {k: v["key"] for k, v in _DEFAULT_TEMPLATES.items()}
-KEY_TO_TEMPLATE_LABEL: Dict[str, str] = {v["key"]: k for k, v in _DEFAULT_TEMPLATES.items()}
-KEY_TO_TEMPLATE_LABEL["smoke"] = "冒烟测试"
-TEMPLATE_GUIDE: Dict[str, str] = {k: v["guide"] for k, v in _DEFAULT_TEMPLATES.items()}
+KEY_TO_TEMPLATE_LABEL: Dict[str, str] = {
+    "market_analyst": "市场分析 (CMO)",
+    "tech_lead": "技术评估 (CTO)",
+    "finance_expert": "财务审计 (CFO)",
+    "risk_manager": "风险管理 (Red Team)",
+    "chairman_summary": "董事长总结 (Chairman)",
+    "summary": "摘要总结",
+    "translation": "中英翻译",
+    "rewrite": "润色改写",
+    "extract": "信息抽取",
+    "qa": "问答助手",
+    "custom": "自定义原样发送",
+    "smoke": "冒烟测试",
+}
 
-CUSTOM_CSS: str = ""
-
-def _load_metadata():
-    """从外部 JSON 和 CSS 文件加载元数据，若不存在则保留默认硬编码值"""
-    global PROVIDERS, PROVIDER_LABEL_TO_KEY, TEMPLATE_LABEL_TO_KEY, KEY_TO_TEMPLATE_LABEL, TEMPLATE_GUIDE, CUSTOM_CSS
-    
-    # 加载 Providers 和 Templates
-    meta_path = core.STATE_DIR / "providers.json"
-    if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            ext_providers = meta.get("providers", {})
-            if ext_providers:
-                PROVIDERS.update(ext_providers)
-                PROVIDER_LABEL_TO_KEY.update({v["label"]: k for k, v in ext_providers.items()})
-            
-            ext_templates = meta.get("templates", {})
-            if ext_templates:
-                TEMPLATE_LABEL_TO_KEY.update({k: v["key"] for k, v in ext_templates.items()})
-                KEY_TO_TEMPLATE_LABEL.update({v["key"]: k for k, v in ext_templates.items()})
-                TEMPLATE_GUIDE.update({k: v["guide"] for k, v in ext_templates.items()})
-        except Exception as e:
-            print(f"Error loading providers.json: {e}")
-
-    # 加载 CSS
-    css_path = core.STATE_DIR / "style.css"
-    if css_path.exists():
-        CUSTOM_CSS = css_path.read_text(encoding="utf-8")
-    else:
-        CUSTOM_CSS = ""
-
-_load_metadata()
+TEMPLATE_GUIDE: Dict[str, str] = {
+    "市场分析 (CMO)": "从市场规模、竞争对手、用户痛点角度分析议案",
+    "技术评估 (CTO)": "评估技术可行性、架构复杂度与核心栈",
+    "财务审计 (CFO)": "进行成本收益分析，识别财务风险",
+    "风险管理 (Red Team)": "从法律合规和逻辑漏洞角度做风险评估",
+    "董事长总结 (Chairman)": "汇总分歧与共识并给出最终建议",
+    "摘要总结": "适合长文快速提炼要点 默认输出结构化结论",
+    "中英翻译": "输入任意语言文本 自动翻译并尽量保留语气",
+    "润色改写": "适合邮件 汇报 简历语句优化",
+    "信息抽取": "自动提取人名 日期 行动项 截止时间",
+    "问答助手": "输入问题后给出简洁可执行步骤",
+    "自定义原样发送": "不会套模板 直接把输入内容发送给网页 AI",
+}
 
 EXAMPLE_INPUTS: List[List[str]] = [
     ["摘要总结", "请总结下面会议纪要并输出三条结论和三条行动项\n本周完成接口联调\n下周开始灰度发布\n风险是测试资源不足"],
@@ -184,6 +140,376 @@ EXAMPLE_INPUTS: List[List[str]] = [
 ]
 
 HISTORY_FILTERS = ["全部", "仅成功", "仅失败"]
+
+CUSTOM_CSS = """
+:root { color-scheme: light; }
+footer, #footer, .gradio-container .footer, [data-testid='footer'] { display: none !important; }
+
+.gradio-container {
+  --app-surface: #ffffff;
+  --app-surface-muted: #f5f7fb;
+  --app-text: #111827;
+  --app-border: #dbe2ee;
+  --body-background-fill: #f5f7fb;
+  --block-background-fill: #ffffff;
+  --block-border-color: #dbe2ee;
+  --block-label-text-color: #111827;
+  --body-text-color: #111827;
+  --body-text-color-subdued: #4b5563;
+  --input-background-fill: #ffffff;
+  --input-border-color: #cbd5e1;
+  --input-placeholder-color: #6b7280;
+  --color-accent: #1a73e8;
+  --color-accent-soft: #e8f0fe;
+  font-family: "Google Sans", "HarmonyOS Sans SC", "MiSans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background:
+    radial-gradient(1000px 300px at 8% -8%, #e8f0fe 0%, rgba(232,240,254,0) 65%),
+    radial-gradient(800px 260px at 92% -18%, #f3f8ff 0%, rgba(243,248,255,0) 65%),
+    #f7f9fc;
+  color: #111827;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.hero {
+  border: 1px solid #d2e3fc;
+  border-radius: 22px;
+  background: #ffffff;
+  padding: 22px;
+  margin-bottom: 14px;
+  box-shadow: 0 10px 28px rgba(26,115,232,0.08);
+}
+.hero-title { font-size: 34px; font-weight: 800; color: #202124; margin-bottom: 8px; }
+.hero-sub { font-size: 16px; color: #4b5563; margin-bottom: 12px; }
+.hero-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.hero-chip {
+  display: inline-block;
+  border: 1px solid #d2e3fc;
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: #eef4ff;
+  color: #174ea6;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.section-card {
+  border: 1px solid var(--app-border);
+  border-radius: 18px;
+  background: var(--app-surface);
+  box-shadow: 0 4px 14px rgba(60,64,67,0.07);
+  padding: 14px;
+  margin-top: 8px;
+}
+
+.section-card,
+.section-card * {
+  color: #111827 !important;
+}
+
+.section-card .prose,
+.section-card .prose * {
+  background: transparent !important;
+}
+
+.section-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #202124;
+  margin-bottom: 10px;
+}
+
+.gradio-container .tabs {
+  background: transparent !important;
+}
+
+.gradio-container .tabs button {
+  color: #374151 !important;
+  font-weight: 600 !important;
+  border-bottom: 2px solid transparent !important;
+  background: #f5f7fb !important;
+  border-radius: 10px 10px 0 0 !important;
+}
+
+.gradio-container .tabs button:hover {
+  color: #174ea6 !important;
+  background: #eef4ff !important;
+}
+
+.gradio-container .tabs button[aria-selected='true'] {
+  color: #174ea6 !important;
+  font-weight: 700 !important;
+  border-bottom: 2px solid #1a73e8 !important;
+  background: #ffffff !important;
+  box-shadow: inset 0 -1px 0 #1a73e8 !important;
+}
+
+.gradio-container textarea,
+.gradio-container input,
+.gradio-container .wrap,
+.gradio-container .block {
+  color: #202124 !important;
+}
+
+.gradio-container textarea,
+.gradio-container input {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 10px !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04) !important;
+}
+
+.gradio-container .prose,
+.gradio-container .prose * {
+  color: #202124 !important;
+}
+
+.gradio-container .prose h1,
+.gradio-container .prose h2,
+.gradio-container .prose h3,
+.gradio-container .prose h4 {
+  color: #1f1f1f !important;
+}
+
+.gradio-container .prose p,
+.gradio-container .prose li,
+.gradio-container .prose strong {
+  color: #111827 !important;
+  line-height: 1.75 !important;
+  font-size: 15px !important;
+}
+
+.gradio-container .prose code,
+.gradio-container .prose pre {
+  background: #f6f8fc !important;
+  color: #1f1f1f !important;
+  border: 1px solid #e3e8f0 !important;
+}
+
+.gradio-container [class*='markdown'],
+.gradio-container [class*='markdown'] > div {
+  background: #ffffff !important;
+  border-radius: 10px !important;
+}
+
+.action-primary button {
+  background: #1a73e8 !important;
+  border-color: #1a73e8 !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+}
+.action-primary button:hover { background: #1967d2 !important; }
+
+.action-secondary button {
+  background: #ffffff !important;
+  border-color: #d2e3fc !important;
+  color: #174ea6 !important;
+  font-weight: 700 !important;
+}
+
+.provider-card textarea,
+.provider-card input {
+  background: #f7faff !important;
+}
+
+.cn-quick-actions {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  border: 1px solid #d2e3fc;
+  border-radius: 16px;
+  padding: 14px;
+  background: #eef4ff;
+}
+.cn-quick-title { font-size: 18px; font-weight: 700; color: #174ea6; margin-bottom: 10px; }
+.cn-quick-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.cn-quick-btn {
+  display: block;
+  text-align: center;
+  text-decoration: none !important;
+  font-size: 15px;
+  font-weight: 700;
+  color: #ffffff !important;
+  padding: 12px 10px;
+  border-radius: 10px;
+  border: 1px solid #1a73e8;
+  background: #1a73e8;
+}
+.cn-quick-btn:hover { background: #1967d2; }
+.cn-quick-tip { margin-top: 10px; color: #3c4043; font-size: 13px; }
+
+.gradio-container label,
+.gradio-container .label-wrap,
+.gradio-container .svelte-1ipelgc {
+  color: #111827 !important;
+}
+
+/* History table readability in light mode */
+#history-table,
+#history-table > div,
+#history-table .table-container,
+#history-table [data-testid='dataframe'],
+#history-table [data-testid='dataframe'] * {
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border-color: var(--app-border) !important;
+}
+
+#history-table table,
+#history-table thead,
+#history-table tbody,
+#history-table tr,
+#history-table th,
+#history-table td {
+  background: #ffffff !important;
+  color: #111827 !important;
+  border-color: #dbe2ee !important;
+}
+
+#history-table th {
+  font-weight: 700 !important;
+}
+
+#history-table .table-wrap,
+#history-table .table-wrap * {
+  color: #111827 !important;
+  border-color: #dbe2ee !important;
+}
+
+#history-table [role='grid'],
+#history-table [role='row'],
+#history-table [role='gridcell'],
+#history-table [role='columnheader'] {
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+}
+
+#history-table td *,
+#history-table th * {
+  color: var(--app-text) !important;
+  background: transparent !important;
+}
+
+#history-filter,
+#history-filter * {
+  color: #111827 !important;
+}
+
+@media (max-width: 900px) {
+  .hero-title { font-size: 26px; }
+  .cn-quick-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root { color-scheme: dark; }
+  .gradio-container {
+    --app-surface: #111827;
+    --app-surface-muted: #0b1220;
+    --app-text: #e5e7eb;
+    --app-border: #334155;
+    --body-background-fill: #0f172a;
+    --block-background-fill: #111827;
+    --body-text-color: #e5e7eb;
+    --body-text-color-subdued: #9ca3af;
+    --input-background-fill: #0b1220;
+    --input-border-color: #334155;
+    --block-border-color: #334155;
+    background:
+      radial-gradient(1000px 300px at 8% -8%, #1e3a8a 0%, rgba(30,58,138,0) 65%),
+      radial-gradient(800px 260px at 92% -18%, #1f2937 0%, rgba(31,41,55,0) 65%),
+      #0b1220 !important;
+    color: #e5e7eb !important;
+  }
+
+  .hero,
+  .section-card,
+  .cn-quick-actions {
+    background: #111827 !important;
+    border-color: #334155 !important;
+    color: #e5e7eb !important;
+  }
+
+  .hero-title,
+  .section-title,
+  .gradio-container .prose,
+  .gradio-container .prose *,
+  .section-card,
+  .section-card * {
+    color: #e5e7eb !important;
+  }
+
+  .hero-sub,
+  .cn-quick-tip {
+    color: #cbd5e1 !important;
+  }
+
+  .gradio-container [class*='markdown'],
+  .gradio-container [class*='markdown'] > div {
+    background: #111827 !important;
+    color: #e5e7eb !important;
+  }
+
+  .action-secondary button {
+    background: #0b1220 !important;
+    color: #93c5fd !important;
+    border-color: #334155 !important;
+  }
+
+  .gradio-container textarea,
+  .gradio-container input {
+    background: #0b1220 !important;
+    color: #e5e7eb !important;
+    border-color: #334155 !important;
+  }
+
+  .gradio-container .tabs button {
+    background: #0b1220 !important;
+    color: #cbd5e1 !important;
+  }
+
+  .gradio-container .tabs button[aria-selected='true'] {
+    background: #111827 !important;
+    color: #93c5fd !important;
+    border-bottom-color: #60a5fa !important;
+  }
+
+  /* History table readability in dark mode */
+  #history-table table,
+  #history-table thead,
+  #history-table tbody,
+  #history-table tr,
+  #history-table th,
+  #history-table td {
+    background: #0b1220 !important;
+    color: #e5e7eb !important;
+    border-color: #334155 !important;
+  }
+
+  #history-table .table-wrap,
+  #history-table .table-wrap *,
+  #history-table [role='grid'],
+  #history-table [role='row'],
+  #history-table [role='gridcell'],
+  #history-table [role='columnheader'] {
+    background: #0b1220 !important;
+    color: #e5e7eb !important;
+    border-color: #334155 !important;
+  }
+
+  #history-table td *,
+  #history-table th * {
+    color: #e5e7eb !important;
+    background: transparent !important;
+  }
+
+  #history-filter,
+  #history-filter * {
+    color: #e5e7eb !important;
+  }
+}
+"""
 
 
 def _ensure_dirs() -> None:
@@ -214,78 +540,33 @@ def _provider_guide_text(provider_label: str) -> str:
 
 def _build_api_doc_text() -> str:
     lines = [
-        "ShadowBoard | 个人虚拟董事会 & 零成本 MoE 决策引擎 v3.0 接口文档",
+        "ShadowBoard 网页 AI 半自动助手 接口文档",
         "",
-        "=== 核心产品特性 ===",
-        "1. 🎭 角色化辩论 (Debate)：内置 CMO, CTO, CFO, Risk Manager 等专家角色 Prompt",
-        "2. 🎼 跨模型接力 (Relay)：支持使用 {prev_result} 自动注入前序董事会环节输出",
-        "3. ⚖️ 自动聚合 (Synthesis)：支持由本地模型或指定节点担任董事长进行最终归纳",
-        "4. 🛡️ 故障自愈 (Recovery)：线性回退重试 + 本地 Ollama 降级保障议程不中断",
+        "功能事件列表",
+        "1 应用平台预设 事件 应用平台预设",
+        "2 保存参数 事件 保存参数",
+        "3 打开登录浏览器 事件 打开登录浏览器",
+        "4 登录完成检查 事件 登录完成检查",
+        "5 执行冒烟测试 事件 执行冒烟测试",
+        "6 一键准备 事件 一键准备",
+        "7 开始执行 事件 开始执行",
+        "8 复用上次输入 事件 复用上次输入",
+        "9 导出结果 事件 导出结果",
+        "10 刷新历史 事件 刷新历史",
+        "11 清空历史 事件 清空历史",
+        "12 健康检查 事件 健康检查",
+        "13 查看最近错误日志 事件 查看最近错误日志",
         "",
-        "=== v3.0 重构特性 ===",
-        "5. 任务追踪 (TaskTracker)：完整生命周期管理、事件监听、依赖解析",
-        "6. 会议纪要 (MemoryStore)：多会话管理、上下文窗口、消息语义搜索",
-        "7. 智能工作流 (Workflow)：内置 Startup_Review 等 4 套标准会议议程",
-        "8. 决策报表 (Monitor)：决策效率指标收集、系统健康度、告警管理",
-        "",
-        "=== 董事会功能列表 ===",
-        "",
-        "-- 平台与配置 --",
-        "1. 应用平台预设 - 切换目标 AI 董事会席位 (DeepSeek/Kimi/Qwen)",
-        "2. 保存参数 - 持久化配置到 config.json",
-        "3. 建立远程连接 - 启动持久化浏览器会话",
-        "4. 登录状态验证 - 验证 Web AI 登录状态",
-        "5. 执行冒烟测试 - 发送测试消息验证链路连通性",
-        "6. 一键准备 - 自动化初始化董事会环境",
-        "",
-        "-- 召开会议 --",
-        "7. 立即执行 - 执行单个董事环节并等待响应",
-        "8. 复用议案 - 快速填充历史输入内容",
-        "9. 导出纪要 - 保存 AI 响应为 Markdown 格式",
-        "",
-        "-- 链式会议 (队列) --",
-        "10. 加入议程 - 添加任务到批量辩论队列",
-        "11. 执行首个环节 - 处理队列首个董事会环节",
-        "12. 清空议程 - 移除所有待处理环节",
-        "",
-        "-- 智能工作流 --",
-        "13. 查看议程详情 - 显示步骤角色和逻辑依赖",
-        "14. 一键召开董事会 - 运行完整预设工作流",
-        "",
-        "-- 会议纪要 --",
-        "15. 开启新议程 - 新建对话会话",
-        "16. 切换议程 - 切换到指定历史纪要",
-        "17. 查看发言记录 - 显示会话详细历史内容",
-        "",
-        "-- 决策报表 --",
-        "18. 刷新仪表盘 - 获取系统运行状态",
-        "19. 执行统计 - 查看各角色执行频率与耗时",
-        "20. 组件健康度 - 检测自动化引擎各组件状态",
-        "",
-        "-- 历史与诊断 --",
-        "21. 同步物理历史 - 从本地磁盘刷新记录",
-        "22. 清空物理记录 - 彻底清除本地任务日志",
-        "23. 底层体检 - 完整系统链路状态诊断",
-        "24. 错误追溯 - 显示最近 5 条异常现场日志",
-        "",
-        "=== 平台支持席位 ===",
+        "平台支持",
     ]
     for p in PROVIDERS.values():
         lines.append(f"- {p['label']} {p['url']} 发送方式 {p['send_mode']}")
     lines.extend(
         [
             "",
-            "=== 模块结构 (src/) ===",
-            "core/        - 核心引擎 (config, browser, exceptions)",
-            "models/      - 数据模型 (task, session, history)",
-            "services/    - 业务服务 (task_tracker, memory_store, workflow, monitor)",
-            "utils/       - 工具函数 (cache, helpers)",
-            "",
-            "=== 说明 ===",
+            "说明",
             "本工具通过浏览器自动化与网页 AI 交互",
-            "登录、验证码、风控等步骤需用户人工配合",
-            "",
-            "详细使用指南请参阅: docs/USER_GUIDE.md",
+            "登录 验证码 风控等步骤需用户人工配合",
         ]
     )
     return "\n".join(lines)
@@ -400,15 +681,8 @@ def _latest_errors() -> str:
 
 def _health_check() -> str:
     cfg = core.load_config()
-    
-    # Get task statistics from tracker
-    tracker = _get_task_tracker()
-    task_stats = tracker.get_statistics()
-    
-    # Get memory statistics
-    memory = _get_memory_store()
-    memory_stats = memory.get_statistics()
-    
+    task_stats = _get_task_tracker().get_statistics()
+    memory_stats = _get_memory_store().get_statistics()
     status = {
         "状态目录": str(core.STATE_DIR),
         "登录目录存在": core.PROFILE_DIR.exists(),
@@ -419,11 +693,22 @@ def _health_check() -> str:
         "发送前确认": cfg.get("confirm_before_send"),
         "重试次数": cfg.get("max_retries"),
         "当前平台": cfg.get("provider_key", "deepseek"),
-        # New metrics
         "任务统计": task_stats,
         "内存统计": memory_stats,
     }
     return json.dumps(status, ensure_ascii=False, indent=2)
+
+
+def _get_task_tracker():
+    from src.core.dependencies import get_task_tracker
+
+    return get_task_tracker()
+
+
+def _get_memory_store():
+    from src.core.dependencies import get_memory_store
+
+    return get_memory_store()
 
 
 def _pick_available_port(start: int = 7860, end: int = 7875) -> int:
@@ -476,22 +761,6 @@ def _save_config_from_form(
     cfg["response_timeout_seconds"] = int(response_timeout_seconds)
     core.save_config(cfg)
     return "配置已保存", _build_guide_markdown(), _provider_guide_text(provider_label)
-
-
-async def _delayed_exit(delay: float = 2.0):
-    """Wait and then terminate the process."""
-    await asyncio.sleep(delay)
-    # Use SIGTERM for graceful exit if possible, or kill
-    os.kill(os.getpid(), signal.SIGTERM)
-
-
-async def _shutdown_system() -> str:
-    """Clean up resources and shut down the server."""
-    # 1. Close any open browser sessions
-    await _close_login_session()
-    # 2. Schedule process termination
-    asyncio.create_task(_delayed_exit(2.0))
-    return "系统正在安全关闭中... 请在 2 秒后直接关闭此浏览器标签页。终端进程即将退出。"
 
 
 async def _close_login_session() -> None:
@@ -676,99 +945,50 @@ async def _add_to_queue(template_label: str, user_input: str) -> str:
     async with get_queue_lock():
         item = QueueItem(template_label=template_label, user_input=raw_input)
         TASK_QUEUE.append(item)
-        
-        # Create task in tracker
-        tracker = _get_task_tracker()
-        template_key = TEMPLATE_LABEL_TO_KEY.get(template_label, "custom")
-        task = await tracker.create_task(
-            template_key=template_key,
-            user_input=raw_input,
-            prompt=core.build_prompt(template_key, raw_input),
-        )
-        item.task_id = task.id
-        
-    return f"已成功加入队列 (ID: {item.id}, TaskID: {task.id})，当前队列长度: {len(TASK_QUEUE)}"
+    return f"已成功加入队列 (ID: {item.id})，当前队列长度: {len(TASK_QUEUE)}"
 
 def _render_queue_table() -> List[List[Any]]:
     return [[item.id, item.added_at, item.template_label, item.user_input[:20], item.status, item.result[:30]] for item in TASK_QUEUE]
 
 async def _process_queue_once():
-    tracker = _get_task_tracker()
-    monitor = _get_monitor()
-    
     async with get_queue_lock():
         pending = [item for item in TASK_QUEUE if item.status == "等待中"]
         if not pending:
             return "队列中没有等待执行的任务", _render_queue_table()
-        
-        # 获取当前任务及其索引
-        current_idx = TASK_QUEUE.index(pending[0])
-        target = TASK_QUEUE[current_idx]
-        
-        # 提取前序任务结果 (如果有的话)
-        prev_result = ""
-        if current_idx > 0:
-            prev_result = str(TASK_QUEUE[current_idx - 1].result)
-        
+        target = pending[0]
         target.status = "执行中"
-        
-        # Update task tracker
-        if target.task_id:
-            await tracker.start_task(target.task_id)
     
     cfg = core.load_config()
     run_cfg = copy.deepcopy(cfg)
     run_cfg["confirm_before_send"] = False
     template_key = TEMPLATE_LABEL_TO_KEY.get(target.template_label, "custom")
-    
-    # 动态注入前序结果
-    processed_input = target.user_input.replace("{prev_result}", prev_result)
-    prompt = core.build_prompt(template_key, processed_input)
+    prompt = core.build_prompt(template_key, target.user_input)
 
     started = time.time()
     response = ""
-    ok = False
     try:
         async for chunk in core.send_with_retry(run_cfg, prompt):
             response = chunk
             target.result = f"收到 {len(response)} 字..."
-        
-        if not response:
-            raise RuntimeError("Task executed but returned empty response.")
-            
         target.status = "执行成功"
         target.result = response
         ok = True
-        
-        # Complete task in tracker
-        if target.task_id:
-            await tracker.complete_task(target.task_id, response)
-            monitor.record_task_execution(True, time.time() - started, template_key)
-            
     except Exception as exc:
         target.status = "执行失败"
-        target.result = f"Error: {exc}"
+        target.result = str(exc)
         ok = False
         
-        # Fail task in tracker
-        if target.task_id:
-            await tracker.fail_task(target.task_id, str(exc))
-            monitor.record_task_execution(False, time.time() - started, template_key)
-            
-    finally:
-        elapsed = round(time.time() - started, 2)
-        core.append_history(
-            {
-                "time": datetime.now().isoformat(timespec="seconds"),
-                "template": template_key,
-                "input_chars": len(target.user_input),
-                "response_chars": len(response),
-                "duration_seconds": elapsed,
-                "ok": ok,
-                "error": str(target.result) if not ok else "",
-                "task_id": target.task_id,
-            }
-        )
+    elapsed = round(time.time() - started, 2)
+    core.append_history(
+        {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "template": template_key,
+            "input_chars": len(target.user_input),
+            "response_chars": len(response),
+            "duration_seconds": elapsed,
+            "ok": ok,
+        }
+    )
     return f"任务 {target.id} 已处理完毕 ({target.status})", _render_queue_table()
 
 async def _clear_queue():
@@ -776,320 +996,157 @@ async def _clear_queue():
         TASK_QUEUE.clear()
     return "队列已清空", _render_queue_table()
 
-# --- New Features: Task Statistics & Workflow Management ---
-
-def _get_task_statistics() -> str:
-    """Get task statistics from TaskTracker."""
-    tracker = _get_task_tracker()
-    stats = tracker.get_statistics()
-    return json.dumps(stats, ensure_ascii=False, indent=2)
-
-def _get_memory_statistics() -> str:
-    """Get memory/session statistics."""
-    store = _get_memory_store()
-    stats = store.get_statistics()
-    return json.dumps(stats, ensure_ascii=False, indent=2)
-
-def _get_dashboard_data() -> str:
-    """Get comprehensive dashboard data."""
-    monitor = _get_monitor()
-    data = monitor.get_dashboard_data()
-    return json.dumps(data, ensure_ascii=False, indent=2)
-
-def _list_workflows() -> List[str]:
-    """List available workflow templates."""
-    engine = _get_workflow_engine()
-    workflows = engine.list_workflows()
-    return [f"{w.name} ({w.id})" for w in workflows]
-
-def _get_workflow_details(workflow_name: str) -> str:
-    """Get details of a specific workflow."""
-    engine = _get_workflow_engine()
-    workflows = engine.list_workflows()
-    
-    for w in workflows:
-        if w.name in workflow_name or w.id in workflow_name:
-            steps_info = []
-            for step in w.steps:
-                steps_info.append(f"  - {step.name} ({step.step_type.value})")
-            
-            return f"""Workflow: {w.name}
-ID: {w.id}
-Version: {w.version}
-Description: {w.description}
-
-Steps:
-""" + "\n".join(steps_info)
-    
-    return "Workflow not found"
-
-async def _execute_workflow(workflow_name: str, user_input: str) -> Tuple[str, str]:
-    """Execute a workflow with user input."""
-    engine = _get_workflow_engine()
-    workflows = engine.list_workflows()
-    
-    workflow = None
-    for w in workflows:
-        if w.name in workflow_name or w.id in workflow_name:
-            workflow = w
-            break
-    
-    if not workflow:
-        return "Workflow not found", ""
-    
-    # Execute with context
-    context = {"user_input": user_input}
-    
-    try:
-        execution = await engine.execute(workflow.id, context)
-        
-        if execution.state.value == "completed":
-            # Get last step result
-            last_result = list(execution.step_results.values())[-1] if execution.step_results else ""
-            return f"Workflow completed successfully. Execution ID: {execution.id}", str(last_result)[:2000]
-        else:
-            return f"Workflow {execution.state.value}: {execution.error}", ""
-    except Exception as e:
-        return f"Workflow execution failed: {e}", ""
-
-# --- Session Memory Functions ---
-
-def _create_session(title: str) -> Tuple[str, List[List[Any]]]:
-    """Create a new session."""
-    manager = _get_session_manager()
-    session = manager._store.create_session(title=title)
-    manager._store.set_current_session(session.id)
-    # Return success message and updated session list
-    sessions = manager.list_sessions()
-    session_list = [[s.id, s.title, s.message_count, s.state.value, s.updated_at.strftime("%Y-%m-%d %H:%M")] for s in sessions]
-    return f"Session created: {session.id}", session_list
-
-def _list_sessions() -> List[List[Any]]:
-    """List all sessions."""
-    manager = _get_session_manager()
-    sessions = manager.list_sessions()
-    return [[s.id, s.title, s.message_count, s.state.value, s.updated_at.strftime("%Y-%m-%d %H:%M")] for s in sessions]
-
-def _get_session_context(session_id: str) -> str:
-    """Get context from a session."""
-    if not session_id or not session_id.strip():
-        return "Please enter a session ID"
-    store = _get_memory_store()
-    context = store.get_context(session_id.strip())
-    if not context:
-        return "No messages in session or session not found"
-    return "\n".join([f"[{m['role']}]: {m['content'][:200]}{'...' if len(m['content']) > 200 else ''}" for m in context])
-
-def _switch_session(session_id: str) -> Tuple[str, str]:
-    """Switch to a different session."""
-    if not session_id or not session_id.strip():
-        return "Please enter a session ID", ""
-    manager = _get_session_manager()
-    if manager.switch_session(session_id.strip()):
-        context = _get_session_context(session_id.strip())
-        return f"Switched to session: {session_id}", context
-    return f"Failed to switch to session: {session_id}", ""
-
-def _get_memory_statistics() -> str:
-    """Get memory/session statistics."""
-    store = _get_memory_store()
-    stats = store.get_statistics()
-    return json.dumps(stats, ensure_ascii=False, indent=2)
-
 def build_ui() -> gr.Blocks:
-    import gradio as gr
     provider_labels = [v["label"] for v in PROVIDERS.values()]
 
-    with gr.Blocks(title="ShadowBoard | 个人虚拟董事会 & 零成本 MoE 决策引擎") as demo:
+    with gr.Blocks(title="网页 AI 半自动助手") as demo:
         gr.HTML(
             """
 <div class='hero'>
-  <div class='hero-title'>ShadowBoard</div>
-  <div class='hero-sub'>个人虚拟董事会 & 零成本 MoE 决策引擎：让每一份灵感都经得起多维度的拷问</div>
+  <div class='hero-title'>网页 AI 半自动助手</div>
+  <div class='hero-sub'>现代化配色 多平台模型入口 引导式流程与可审计执行</div>
   <div class='hero-chips'>
-    <span class='hero-chip'>🎭 多角色辩论 (Debate)</span>
-    <span class='hero-chip'>🎼 跨模型接力 (Relay)</span>
-    <span class='hero-chip'>⚓ 语义锚点 (Anchor)</span>
-    <span class='hero-chip'>🛡️ 故障自愈 (Recovery)</span>
+    <span class='hero-chip'>多平台适配</span>
+    <span class='hero-chip'>自动重试和错误日志</span>
+    <span class='hero-chip'>新手引导和一键准备</span>
   </div>
 </div>
 """.strip()
         )
 
-        with gr.Tabs():
-            with gr.Tab("🚀 快速上手"):
+        with gr.Tab("新手向导"):
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>快速开始</div>")
+                guide_markdown = gr.Markdown()
                 with gr.Row():
-                    with gr.Column(scale=2):
-                        with gr.Group(elem_classes=["section-card"]):
-                            gr.Markdown("<div class='section-title'>董事会操作向导</div>")
-                            guide_markdown = gr.Markdown()
-                            with gr.Row():
-                                refresh_guide_btn = gr.Button("刷新进度", elem_classes=["action-secondary"])
-                                one_click_btn = gr.Button("一键初始化董事会环境", elem_classes=["action-primary"])
-                                shutdown_btn = gr.Button("🛑 安全关闭系统 (Shutdown)", variant="stop")
-                    
-                    with gr.Column(scale=1):
-                        with gr.Group(elem_classes=["section-card"]):
-                            gr.Markdown("<div class='section-title'>智能决策特性</div>")
-                            gr.Markdown(
-                                """
-- **多角色辩论**: CMO/CTO/CFO 角色注入
-- **任务接力**: `{prev_result}` 跨模型透传
-- **自愈定位**: 零成本抗 UI 变动能力
-- **本地归纳**: 支持 Ollama 董事长归纳
+                    refresh_guide_btn = gr.Button("刷新进度建议", elem_classes=["action-secondary"])
+                    one_click_btn = gr.Button("一键准备", elem_classes=["action-primary"])
+
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown(
+                    """
+<div class='section-title'>常见问题</div>
+1 登录后仍失败 先点击 登录完成检查 再点击 执行冒烟测试
+2 页面元素找不到 在平台与参数把发送方式切到 点击按钮发送
+3 长文本效果差 建议分段执行 每段三千字以内
+4 出现验证码 请在浏览器手动完成后重试
 """.strip()
-                            )
+                )
 
-            with gr.Tab("⚙️ 平台与配置"):
+        with gr.Tab("平台与参数"):
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>平台选择</div>")
                 with gr.Row():
-                    with gr.Column(scale=1):
-                        with gr.Group(elem_classes=["section-card"]):
-                            gr.Markdown("<div class='section-title'>AI 平台预设</div>")
-                            provider_label = gr.Dropdown(provider_labels, value=PROVIDERS["deepseek"]["label"], label="当前激活平台")
-                            apply_provider_btn = gr.Button("应用预设", elem_classes=["action-secondary"])
-                            provider_guide = gr.Textbox(label="平台指引", lines=3, elem_classes=["provider-card"])
+                    provider_label = gr.Dropdown(provider_labels, value=PROVIDERS["deepseek"]["label"], label="目标平台")
+                    apply_provider_btn = gr.Button("应用平台预设", elem_classes=["action-primary"])
+                provider_guide = gr.Textbox(label="平台引导", lines=4, elem_classes=["provider-card"])
 
-                    with gr.Column(scale=2):
-                        with gr.Group(elem_classes=["section-card"]):
-                            gr.Markdown("<div class='section-title'>全局参数</div>")
-                            with gr.Row():
-                                target_url = gr.Textbox(label="入口地址", scale=2)
-                                send_mode = gr.Radio(choices=[("回车", "enter"), ("点击", "button")], label="交互方式", scale=1)
-                            with gr.Row():
-                                confirm_before_send = gr.Checkbox(label="启用确认发送", value=True)
-                                max_retries = gr.Slider(1, 6, 3, label="重试次数")
-                                response_timeout = gr.Slider(30, 600, 120, label="超时限制 (s)")
-                            save_btn = gr.Button("保存配置", elem_classes=["action-primary"])
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>连接与执行参数</div>")
+                with gr.Row():
+                    target_url = gr.Textbox(label="目标网址", value="https://chat.deepseek.com/", scale=2)
+                    send_mode = gr.Radio(
+                        choices=[("回车发送", "enter"), ("点击按钮发送", "button")],
+                        value="enter",
+                        label="发送方式",
+                        scale=1,
+                    )
+                with gr.Row():
+                    confirm_before_send = gr.Checkbox(value=True, label="执行前需要确认发送")
+                    max_retries = gr.Slider(minimum=1, maximum=6, step=1, value=3, label="失败自动重试次数")
+                    response_timeout = gr.Slider(minimum=30, maximum=600, step=10, value=120, label="响应超时秒数")
+
+                save_btn = gr.Button("保存参数", elem_classes=["action-primary"])
+                setup_status = gr.Textbox(label="状态反馈", lines=4)
 
                 with gr.Row():
-                    with gr.Column():
-                        with gr.Group(elem_classes=["section-card"]):
-                            gr.Markdown("<div class='section-title'>浏览器会话控制 (持久化存储)</div>")
-                            with gr.Row():
-                                open_login_btn = gr.Button("🔑 建立远程连接/登录", elem_classes=["action-secondary"])
-                                finish_login_btn = gr.Button("✅ 登录检查与持久化", elem_classes=["action-secondary"])
-                                smoke_btn = gr.Button("🔥 链路冒烟测试", elem_classes=["action-primary"])
-                            with gr.Row():
-                                smoke_confirm = gr.Checkbox(label="我已准备好测试")
-                                smoke_pause = gr.Slider(0, 15, 3, label="测试前暂停 (s)")
-                                setup_status = gr.Textbox(label="系统日志", lines=1)
+                    open_login_btn = gr.Button("打开登录浏览器", elem_classes=["action-secondary"])
+                    finish_login_btn = gr.Button("登录完成检查", elem_classes=["action-secondary"])
+                    smoke_btn = gr.Button("执行冒烟测试", elem_classes=["action-primary"])
 
-            with gr.Tab("📝 召开会议 (单次任务)"):
                 with gr.Row():
-                    with gr.Column(scale=1):
-                        with gr.Group(elem_classes=["section-card"]):
-                            gr.Markdown("<div class='section-title'>会议议案编排</div>")
-                            template_label = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="市场分析 (CMO)", label="议案模板 (角色)")
-                            template_help = gr.Markdown()
-                            task_input = gr.Textbox(label="输入议案/想法正文", lines=12, placeholder="在此输入需要董事会评估的想法或原始需求...")
-                            input_tip = gr.Markdown()
-                            send_confirm = gr.Checkbox(label="确认发送 (建议开启)", value=True)
-                            with gr.Row():
-                                run_btn = gr.Button("立即执行", elem_classes=["action-primary"])
-                                reuse_btn = gr.Button("填入上次内容", elem_classes=["action-secondary"])
+                    smoke_confirm = gr.Checkbox(value=False, label="我确认开始冒烟测试")
+                    smoke_pause = gr.Slider(minimum=0, maximum=15, step=1, value=3, label="冒烟测试暂停秒数")
 
-                    with gr.Column(scale=1):
-                        with gr.Group(elem_classes=["section-card"]):
-                            gr.Markdown("<div class='section-title'>执行结果反馈</div>")
-                            run_status = gr.Textbox(label="执行进度", lines=1)
-                            prompt_preview = gr.Textbox(label="提示词预览", lines=2, visible=False)
-                            response_box = gr.Textbox(label="AI 响应内容", lines=18)
-                            with gr.Row():
-                                export_btn = gr.Button("导出 会议纪要 (MD)", elem_classes=["action-secondary"])
-                                export_file = gr.File(label="点击下载", interactive=False)
-                                export_status = gr.Textbox(label="导出状态", lines=1, visible=False)
+        with gr.Tab("执行任务"):
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>任务输入</div>")
+                template_label = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="摘要总结", label="任务模板")
+                template_help = gr.Markdown(_template_help("摘要总结"))
+                task_input = gr.Textbox(label="任务输入", lines=10, placeholder="示例 请总结这段内容 并给出三条下一步建议")
+                input_tip = gr.Markdown("输入提示 请粘贴正文或直接写需求")
+                send_confirm = gr.Checkbox(value=True, label="我确认发送本次任务")
+                with gr.Row():
+                    run_btn = gr.Button("开始执行", elem_classes=["action-primary"])
+                    reuse_btn = gr.Button("复用上次输入", elem_classes=["action-secondary"])
+                gr.Examples(examples=EXAMPLE_INPUTS, inputs=[template_label, task_input], label="示例输入 点击自动填充")
 
-            with gr.Tab("📊 链式会议 (队列)"):
-                with gr.Group(elem_classes=["section-card"]):
-                    gr.Markdown("<div class='section-title'>添加链式辩论环节</div>")
-                    with gr.Row():
-                        q_template = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="市场分析 (CMO)", label="角色环节")
-                        q_input = gr.Textbox(label="针对性指令 (支持 {prev_result} 引用前序环节)", scale=3)
-                        q_add_btn = gr.Button("加入议程", elem_classes=["action-primary"], scale=1)
-                        q_add_status = gr.Textbox(label="添加结果", lines=1, visible=False)
-                
-                with gr.Group(elem_classes=["section-card"]):
-                    gr.Markdown("<div class='section-title'>议程队列监控</div>")
-                    with gr.Row():
-                        q_run_btn = gr.Button("▶ 执行首个环节", elem_classes=["action-primary"])
-                        q_clear_btn = gr.Button("🗑️ 清空议程", elem_classes=["action-secondary"])
-                        q_refresh_btn = gr.Button("🔄 刷新议程状态", elem_classes=["action-secondary"])
-                    q_run_status = gr.Textbox(label="议程运行状态", lines=1)
-                    q_grid = gr.Dataframe(headers=["ID", "添加时间", "环节", "预览", "状态", "结果"], interactive=False)
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>执行结果</div>")
+                run_status = gr.Textbox(label="执行状态", lines=2)
+                prompt_preview = gr.Textbox(label="生成提示词预览", lines=8)
+                response_box = gr.Textbox(label="AI 返回结果", lines=16)
+                with gr.Row():
+                    export_btn = gr.Button("导出结果", elem_classes=["action-secondary"])
+                    export_file = gr.File(label="下载文件", interactive=False)
+                    export_status = gr.Textbox(label="导出状态", lines=2)
 
-            # Updated Tab: Workflow Engine
-            with gr.Tab("🔄 智能工作流"):
-                with gr.Group(elem_classes=["section-card"]):
-                    gr.Markdown("<div class='section-title'>内置董事会工作流模板</div>")
-                    with gr.Row():
-                        workflow_select = gr.Dropdown(choices=_list_workflows(), label="选择智能工作流")
-                        workflow_info_btn = gr.Button("查看议程详情", elem_classes=["action-secondary"])
-                    workflow_details = gr.Textbox(label="工作流详情", lines=6, interactive=False)
-                
-                with gr.Group(elem_classes=["section-card"]):
-                    gr.Markdown("<div class='section-title'>自动执行完整会议议程</div>")
-                    workflow_input = gr.Textbox(label="输入核心议案", lines=4, placeholder="输入需要各部门协作的完整议案内容...")
-                    with gr.Row():
-                        workflow_run_btn = gr.Button("▶ 一键召开董事会", elem_classes=["action-primary"])
-                        workflow_status = gr.Textbox(label="议程状态", lines=1)
-                    workflow_result = gr.Textbox(label="最终决策报告/汇总", lines=10)
-
-            # Updated Tab: Memory & Sessions
-            with gr.Tab("💾 会议纪要 (记忆)"):
-                with gr.Group(elem_classes=["section-card"]):
-                    gr.Markdown("<div class='section-title'>董事会历史会话</div>")
-                    with gr.Row():
-                        session_title = gr.Textbox(label="新会议标题", scale=2)
-                        create_session_btn = gr.Button("开启新议程", elem_classes=["action-primary"])
-                    session_list = gr.Dataframe(headers=["ID", "标题", "发言次数", "状态", "更新时间"], interactive=False)
-                    with gr.Row():
-                        refresh_sessions_btn = gr.Button("刷新纪要列表", elem_classes=["action-secondary"])
-                        switch_session_input = gr.Textbox(label="切换到历史议程ID")
-                        switch_session_btn = gr.Button("切换议程", elem_classes=["action-secondary"])
-                
-                with gr.Group(elem_classes=["section-card"]):
-                    gr.Markdown("<div class='section-title'>完整发言记录</div>")
-                    session_context_btn = gr.Button("查看发言记录", elem_classes=["action-secondary"])
-                    session_context = gr.Textbox(label="董事会对话历史", lines=8, interactive=False)
-                    memory_stats = gr.Textbox(label="存储统计", lines=3)
-
-            # Updated Tab: Monitoring Dashboard
-            with gr.Tab("📈 董事会报表"):
-                with gr.Group(elem_classes=["section-card"]):
-                    gr.Markdown("<div class='section-title'>决策效率监控</div>")
-                    with gr.Row():
-                        dashboard_refresh_btn = gr.Button("刷新数据报表", elem_classes=["action-primary"])
-                        task_stats_btn = gr.Button("执行频率统计", elem_classes=["action-secondary"])
-                    dashboard_data = gr.Textbox(label="决策仪表盘数据", lines=15)
-                
-                with gr.Group(elem_classes=["section-card"]):
-                    gr.Markdown("<div class='section-title'>系统运行指标</div>")
-                    with gr.Row():
-                        metrics_health_btn = gr.Button("组件健康度", elem_classes=["action-secondary"])
-                        metrics_tasks_btn = gr.Button("成功率统计", elem_classes=["action-secondary"])
-                    metrics_display = gr.Textbox(label="指标数据", lines=10)
-
-        with gr.Tab("🛠️ 诊断与日志"):
+        with gr.Tab("历史与诊断"):
             with gr.Group(elem_classes=["section-card"]):
                 with gr.Row():
-                    history_filter = gr.Radio(choices=HISTORY_FILTERS, value="全部", label="结果过滤")
-                    refresh_history_btn = gr.Button("同步物理历史", elem_classes=["action-secondary"])
-                history_grid = gr.Dataframe(interactive=False)
+                    history_filter = gr.Radio(choices=HISTORY_FILTERS, value="全部", label="历史筛选", elem_id="history-filter")
+                    refresh_history_btn = gr.Button("刷新历史", elem_classes=["action-secondary"])
+
+                history_grid = gr.Dataframe(
+                    headers=["时间", "模板", "耗时秒", "返回字数", "结果", "错误摘要"],
+                    datatype=["str", "str", "number", "number", "str", "str"],
+                    row_count=15,
+                    column_count=(6, "fixed"),
+                    wrap=True,
+                    interactive=False,
+                    elem_id="history-table",
+                )
+
                 with gr.Row():
-                    health_btn = gr.Button("系统底层体检", elem_classes=["action-secondary"])
-                    error_btn = gr.Button("底层错误追溯", elem_classes=["action-secondary"])
-                    clear_history_btn = gr.Button("清空物理记录", elem_classes=["action-secondary"])
-                diag_box = gr.Textbox(label="底层控制台输出", lines=10, elem_classes=["provider-card"])
+                    clear_history_btn = gr.Button("清空历史", elem_classes=["action-secondary"])
+                    health_btn = gr.Button("健康检查", elem_classes=["action-secondary"])
+                    error_btn = gr.Button("查看最近错误日志", elem_classes=["action-secondary"])
+
+                diag_box = gr.Textbox(label="诊断输出", lines=14)
+
+
+        with gr.Tab("批量队列"):
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>添加任务到队列</div>")
+                q_template = gr.Dropdown(list(TEMPLATE_LABEL_TO_KEY.keys()), value="摘要总结", label="任务模板")
+                q_input = gr.Textbox(label="任务输入", lines=3)
+                q_add_btn = gr.Button("加入队列", elem_classes=["action-secondary"])
+                q_add_status = gr.Textbox(label="添加状态", lines=1)
+                
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("<div class='section-title'>队列展示与执行</div>")
+                with gr.Row():
+                    q_refresh_btn = gr.Button("刷新队列", elem_classes=["action-secondary"])
+                    q_clear_btn = gr.Button("清空队列", elem_classes=["action-secondary"])
+                    q_run_btn = gr.Button("执行队列首个任务", elem_classes=["action-primary"])
+                
+                q_run_status = gr.Textbox(label="执行状态", lines=1)
+                q_grid = gr.Dataframe(
+                    headers=["ID", "添加时间", "模板", "内容预览", "状态", "结果摘要"],
+                    datatype=["str", "str", "str", "str", "str", "str"],
+                    row_count=10,
+                    interactive=False,
+                )
 
         with gr.Tab("帮助文档"):
             with gr.Group(elem_classes=["section-card"]):
-                gr.Markdown("<div class='section-title'>接口文档与开发者指引</div>")
-                api_doc_box = gr.Textbox(label="接口说明内容", lines=18)
+                gr.Markdown("<div class='section-title'>接口文档与使用指引</div>")
+                api_doc_box = gr.Textbox(label="接口文档内容", lines=18)
                 with gr.Row():
                     refresh_doc_btn = gr.Button("刷新接口文档", elem_classes=["action-secondary"])
                     export_doc_btn = gr.Button("导出接口文档", elem_classes=["action-primary"])
                 api_doc_file = gr.File(label="接口文档下载", interactive=False)
-                api_doc_status = gr.Textbox(label="文档生成状态", lines=2)
+                api_doc_status = gr.Textbox(label="文档状态", lines=2)
 
         apply_provider_btn.click(
             fn=_apply_provider,
@@ -1107,7 +1164,6 @@ def build_ui() -> gr.Blocks:
         finish_login_btn.click(fn=_finish_login_check, outputs=[setup_status, guide_markdown])
         smoke_btn.click(fn=_run_smoke_test, inputs=[smoke_confirm, smoke_pause], outputs=[setup_status, guide_markdown])
         one_click_btn.click(fn=_one_click_prepare, outputs=[setup_status, guide_markdown])
-        shutdown_btn.click(fn=_shutdown_system, outputs=[setup_status])
 
         template_label.change(fn=_template_help, inputs=[template_label], outputs=[template_help])
         task_input.change(fn=_input_tip, inputs=[task_input], outputs=[input_tip])
@@ -1127,21 +1183,6 @@ def build_ui() -> gr.Blocks:
         health_btn.click(fn=_health_check, outputs=[diag_box])
         error_btn.click(fn=_latest_errors, outputs=[diag_box])
 
-        # Workflow Engine event handlers
-        workflow_info_btn.click(fn=_get_workflow_details, inputs=[workflow_select], outputs=[workflow_details])
-        workflow_run_btn.click(fn=_execute_workflow, inputs=[workflow_select, workflow_input], outputs=[workflow_status, workflow_result])
-
-        # Memory & Sessions event handlers
-        create_session_btn.click(fn=_create_session, inputs=[session_title], outputs=[session_context, session_list])
-        refresh_sessions_btn.click(fn=_list_sessions, outputs=[session_list])
-        switch_session_btn.click(fn=_switch_session, inputs=[switch_session_input], outputs=[session_context, session_context])
-        session_context_btn.click(fn=_get_session_context, inputs=[switch_session_input], outputs=[session_context])
-        
-        # Monitoring Dashboard event handlers
-        dashboard_refresh_btn.click(fn=_get_dashboard_data, outputs=[dashboard_data])
-        task_stats_btn.click(fn=_get_task_statistics, outputs=[dashboard_data])
-        metrics_health_btn.click(fn=_get_dashboard_data, outputs=[metrics_display])
-        metrics_tasks_btn.click(fn=_get_task_statistics, outputs=[metrics_display])
 
         q_add_btn.click(fn=_add_to_queue, inputs=[q_template, q_input], outputs=[q_add_status])
         q_refresh_btn.click(fn=_render_queue_table, outputs=[q_grid])
@@ -1168,9 +1209,6 @@ def build_ui() -> gr.Blocks:
             ],
         )
         demo.load(fn=_history_table, inputs=[history_filter], outputs=[history_grid])
-        demo.load(fn=_list_sessions, outputs=[session_list])
-        demo.load(fn=_get_dashboard_data, outputs=[dashboard_data])
-        demo.load(fn=_get_memory_statistics, outputs=[memory_stats])
 
         gr.HTML(
             """
@@ -1191,20 +1229,10 @@ def build_ui() -> gr.Blocks:
 
 def main() -> None:
     _ensure_dirs()
-    # 确保元数据已加载，以便 build_ui 能正确渲染
-    _load_metadata()
-    import gradio as gr
     app = build_ui()
     app.queue(default_concurrency_limit=1)
     port = _pick_available_port(7860, 7875)
-    
-    app.launch(
-        server_name="127.0.0.1", 
-        server_port=port, 
-        inbrowser=True, 
-        theme=gr.themes.Soft(), 
-        css=CUSTOM_CSS
-    )
+    app.launch(server_name="127.0.0.1", server_port=port, inbrowser=True, theme=gr.themes.Soft(), css=CUSTOM_CSS)
 
 
 if __name__ == "__main__":

@@ -24,4 +24,4 @@ Remove-Item -Path .semi_agent/ -Recurse -Force
 
 ---
 
-[返回首页](Home.md)
+[返回文档中心](Home.md)

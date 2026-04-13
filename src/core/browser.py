@@ -11,13 +11,19 @@ Provides browser automation capabilities with:
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, List, Optional, AsyncGenerator
+from typing import List, Optional, AsyncGenerator, TYPE_CHECKING
 
 from .config import get_config_manager
 from .exceptions import BrowserError
+
+if TYPE_CHECKING:
+    from playwright.async_api import BrowserContext, Page, Playwright, Locator
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,14 +63,14 @@ class BrowserManager:
     """
 
     def __init__(self) -> None:
-        self._playwright: Optional[Any] = None
-        self._context: Optional[Any] = None
-        self._page: Optional[Any] = None
+        self._playwright: Optional[Playwright] = None
+        self._context: Optional[BrowserContext] = None
+        self._page: Optional[Page] = None
         self._session: Optional[BrowserSession] = None
         self._lock = asyncio.Lock()
         self._closed = False
 
-    async def _ensure_playwright(self) -> Any:
+    async def _ensure_playwright(self) -> Playwright:
         """Ensure Playwright is initialized."""
         if self._playwright is None:
             from playwright.async_api import async_playwright
@@ -75,7 +81,7 @@ class BrowserManager:
         self,
         headless: bool = False,
         channel: Optional[str] = None,
-    ) -> Any:
+    ) -> BrowserContext:
         """
         Launch browser with persistent context.
 
@@ -111,34 +117,47 @@ class BrowserManager:
                 )
         except Exception as e:
             # Fallback to default chromium
-            print(f"Warning: Failed to launch with channel '{preferred_channel}': {e}")
+            logger.warning(f"Failed to launch with channel '{preferred_channel}': {e}. Falling back to default.")
             try:
                 self._context = await playwright.chromium.launch_persistent_context(
                     **launch_kwargs
                 )
             except Exception as inner_e:
+                # 修复：显式清理资源防止僵尸进程
+                await self.close()
                 raise BrowserError(
                     f"Failed to launch browser: {inner_e}",
                     cause=inner_e,
                 )
 
         # Create or get page
-        if not self._context.pages:
-            await self._context.new_page()
-        self._page = self._context.pages[0]
+        try:
+            if self._context is None:
+                raise BrowserError("Browser context is None after launch")
+                
+            if not self._context.pages:
+                await self._context.new_page()
+            
+            if not self._context.pages:
+                raise BrowserError("Failed to create page in browser context")
+                
+            self._page = self._context.pages[0]
 
-        # Configure timeouts
-        self._page.set_default_timeout(30000)
-        self._page.set_default_navigation_timeout(60000)
+            # Configure timeouts
+            self._page.set_default_timeout(30000)
+            self._page.set_default_navigation_timeout(60000)
 
-        # Create session tracking
-        import uuid
-        self._session = BrowserSession(id=uuid.uuid4().hex[:8])
-        self._session.page_count = len(self._context.pages)
+            # Create session tracking
+            import uuid
+            self._session = BrowserSession(id=uuid.uuid4().hex[:8])
+            self._session.page_count = len(self._context.pages)
+        except Exception as e:
+            await self.close()
+            raise BrowserError(f"Failed to initialize browser state: {e}", cause=e)
 
         return self._context
 
-    async def get_page(self) -> Any:
+    async def get_page(self) -> Page:
         """
         Get the current page or create one.
 
@@ -149,6 +168,9 @@ class BrowserManager:
             if self._page is None:
                 await self.launch()
 
+            if self._page is None:
+                raise BrowserError("Browser page is unavailable")
+
             if self._session:
                 self._session.touch()
 
@@ -158,7 +180,7 @@ class BrowserManager:
         self,
         url: Optional[str] = None,
         wait_until: str = "domcontentloaded",
-    ) -> Any:
+    ) -> Page:
         """
         Navigate to a URL.
 
@@ -171,6 +193,9 @@ class BrowserManager:
         """
         config = get_config_manager()
         target_url = url or config.get("target_url")
+        
+        if not target_url:
+            raise BrowserError("No navigation URL specified")
 
         page = await self.get_page()
         timeout = config.get("navigation_timeout_seconds", 30) * 1000
@@ -182,8 +207,16 @@ class BrowserManager:
                 timeout=timeout,
             )
         except Exception as e:
-            # Non-fatal navigation errors
-            print(f"Navigation warning: {e}")
+            # 修复：根据重要性适度向上抛出或记录错误状态，防止盲目执行
+            error_msg = f"Navigation failed for {target_url}: {e}"
+            logger.error(error_msg)
+            
+            if self._session:
+                self._session.record_error()
+                
+            # 如果是关键连接错误，向上抛出异常
+            if any(err in str(e) for err in ["ERR_NAME_NOT_RESOLVED", "ERR_CONNECTION_REFUSED", "Timeout"]):
+                raise BrowserError(error_msg, cause=e)
 
         return page
 
@@ -193,15 +226,15 @@ class BrowserManager:
             if self._context is not None:
                 try:
                     await self._context.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error closing browser context: {e}")
                 self._context = None
 
             if self._playwright is not None:
                 try:
                     await self._playwright.stop()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error stopping playwright: {e}")
                 self._playwright = None
 
             self._page = None
@@ -223,7 +256,7 @@ class BrowserManager:
         self,
         url: Optional[str] = None,
         headless: bool = False,
-    ) -> AsyncGenerator[Any, None]:
+    ) -> AsyncGenerator[Page, None]:
         """
         Context manager for browser sessions.
 
@@ -233,6 +266,8 @@ class BrowserManager:
             await self.launch(headless=headless)
             if url:
                 await self.navigate(url)
+            if self._page is None:
+                raise BrowserError("Failed to initialize page in session context")
             yield self._page
         finally:
             await self.close()
@@ -241,10 +276,10 @@ class BrowserManager:
 # Element Locator Utilities
 
 async def get_first_visible_locator(
-    page: Any,
+    page: Page,
     selectors: List[str],
     timeout_ms: int = 5000,
-) -> Optional[Any]:
+) -> Optional[Locator]:
     """
     Find the first visible element matching selectors.
 
@@ -271,26 +306,35 @@ async def get_first_visible_locator(
             return locator
         except PlaywrightTimeoutError:
             continue
+        except Exception as e:
+            logger.debug(f"Locator error for {selector}: {e}")
+            continue
 
     # Stage 2: Semantic fallback (A11y roles)
     if any("textarea" in s for s in selectors):
         for role in ["textbox", "searchbox"]:
-            loc = page.get_by_role(role).first
-            if await loc.count() > 0 and await loc.is_visible():
-                return loc
+            try:
+                loc = page.get_by_role(role).first  # type: ignore
+                if await loc.count() > 0 and await loc.is_visible():
+                    return loc
+            except Exception as e:
+                logger.debug(f"Role search error for {role}: {e}")
 
     # Stage 3: Visual placeholder fallback
     placeholders = ["输入", "message", "chat", "问我", "ask"]
     for placeholder in placeholders:
-        loc = page.get_by_placeholder(placeholder, exact=False).first
-        if await loc.count() > 0 and await loc.is_visible():
-            return loc
+        try:
+            loc = page.get_by_placeholder(placeholder, exact=False).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc
+        except Exception as e:
+            logger.debug(f"Placeholder search error for {placeholder}: {e}")
 
     return None
 
 
 async def get_latest_response_text(
-    page: Any,
+    page: Page,
     selectors: List[str],
 ) -> str:
     """
@@ -305,8 +349,8 @@ async def get_latest_response_text(
     """
     best = ""
     for selector in selectors:
-        loc = page.locator(selector)
         try:
+            loc = page.locator(selector)
             count = await loc.count()
             if count <= 0:
                 continue
@@ -314,6 +358,7 @@ async def get_latest_response_text(
             text = text.strip()
             if len(text) > len(best):
                 best = text
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to get response text for selector {selector}: {e}")
             continue
     return best

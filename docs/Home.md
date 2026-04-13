@@ -1,27 +1,44 @@
-# ShadowBoard Wiki
+# ShadowBoard 文档中心
 
-欢迎来到 **ShadowBoard (个人虚拟董事会)** 官方维基。
-
-ShadowBoard 是一款专为独立开发者、创业者和创作者打造的 **"零 API 成本多模型混合专家系统 (MoE)"**。
+这是项目唯一建议入口。你可以从这里快速定位功能文档、架构文档和历史方案文档。
 
 ---
 
-## 📖 目录
+## 1. 使用与配置
 
-### 1. 核心指南
-*   [快速开始](../README.md) - 环境搭建与首个任务。
-*   [配置手册](Configuration.md) - 深入了解配置参数与环境变量。
-*   [任务模板与角色](User-Guide.md#任务模板与提示词技巧) - 如何定制 CMO/CTO 等角色。
+- [项目总览与快速开始](../README.md)
+- [配置手册](Configuration.md)
+- [常见问题](FAQ.md)
 
-### 2. 技术深度
-*   [工作流引擎](Workflows.md) - DAG 编排、任务接力与逻辑下钻。
-*   [核心服务](Services.md) - 任务追踪、记忆存储与监控系统。
-*   [API 参考](API-Reference.md) - 完整的接口功能列表。
+## 2. 架构与实现
 
-### 3. 开发者手册
-*   [开发与维护](Development.md) - 使用 `sb.go` 进行开发、测试与部署。
-*   [常见问题 (FAQ)](FAQ.md) - 故障排除与常见操作。
+- [系统架构总览](Architecture.md)
+- [核心服务说明](Services.md)
+- [工作流引擎说明](Workflows.md)
+- [API 参考](API-Reference.md)
+- [开发与维护](Development.md)
+
+## 3. 企业升级文档归档
+
+以下文档是历史阶段的企业化规划与交付记录，已统一归档，避免根目录混乱：
+
+- [企业文档导航](enterprise/00_START_HERE.md)
+- [企业架构升级方案](enterprise/ARCHITECTURE_ENTERPRISE_UPGRADE.md)
+- [实施指南](enterprise/IMPLEMENTATION_GUIDE.md)
+- [升级摘要](enterprise/ENTERPRISE_UPGRADE_SUMMARY.md)
+- [交付清单](enterprise/DELIVERY_SUMMARY.md)
 
 ---
 
-*ShadowBoard：让每一份灵感，都经得起多维度的拷问。*
+## 4. 当前代码结构（与源码一致）
+
+```text
+src/
+	core/         # 配置、异常、浏览器管理、依赖注入
+	models/       # Task / Session / History 等数据模型
+	services/     # Workflow / TaskTracker / MemoryStore / Monitor
+	ui/           # Gradio UI 组件与各 Tab 逻辑
+	utils/        # 模板与通用工具函数
+```
+
+如果发现文档与代码不一致，请以源码为准，并在此页补充索引。

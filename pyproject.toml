@@ -1,0 +1,31 @@
+[project]
+name = "shadowboard"
+version = "3.0.0"
+description = "ShadowBoard | 个人虚拟董事会 & 零成本 MoE 决策引擎"
+authors = [
+    { name = "ShadowBoard Team" }
+]
+dependencies = [
+    "playwright>=1.52.0",
+    "gradio>=5.20.0",
+    "httpx>=0.27.0",
+    "pytest-asyncio",
+    "pytest-mock",
+]
+requires-python = ">=3.9"
+
+[project.scripts]
+shadowboard = "main:main"
+shadowboard-ui = "web_app:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

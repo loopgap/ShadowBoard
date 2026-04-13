@@ -34,4 +34,4 @@ export SHADOW_TARGET_URL="https://kimi.moonshot.cn/"
 
 ---
 
-[返回首页](Home.md)
+[返回文档中心](Home.md)
