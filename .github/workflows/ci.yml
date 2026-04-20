@@ -23,15 +23,17 @@ jobs:
           python -m venv .venv
           .venv\Scripts\Activate.ps1
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install ruff pytest pytest-asyncio
+          pip install -e .
+          pip install aiosqlite aiofiles PyJWT pytest-asyncio pytest-mock ruff
 
       - name: Install Playwright Browsers
         run: |
           .venv\Scripts\Activate.ps1
-          python -m playwright install chromium
+          python -m playwright install --with-deps chromium
 
       - name: Run Quality Gate (Lint, Test, Perf)
+        env:
+          CI: "true"
         run: |
           .venv\Scripts\Activate.ps1
           .\quality_gate.ps1
