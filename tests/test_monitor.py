@@ -1,5 +1,5 @@
 """
-Tests for Monitoring Service
+Tests for Monitoring Service (Async)
 """
 
 from __future__ import annotations
@@ -22,48 +22,57 @@ from src.services.monitor import (
 
 
 @pytest.fixture
-def metrics(tmp_path):
+async def metrics(tmp_path):
     """Create a MetricsCollector instance."""
-    return MetricsCollector(state_dir=tmp_path)
+    m = MetricsCollector(state_dir=tmp_path)
+    await m.initialize()
+    return m
 
 
 @pytest.fixture
-def alerts(tmp_path):
+async def alerts(tmp_path):
     """Create an AlertManager instance."""
-    return AlertManager(state_dir=tmp_path)
+    a = AlertManager(state_dir=tmp_path)
+    await a.initialize()
+    return a
 
 
 @pytest.fixture
-def monitor(tmp_path):
+async def monitor(tmp_path):
     """Create a Monitor instance."""
-    return Monitor(state_dir=tmp_path)
+    m = Monitor(state_dir=tmp_path)
+    await m.initialize()
+    return m
 
 
 # MetricsCollector Tests
 
 
-def test_counter_increment(metrics):
+@pytest.mark.asyncio
+async def test_counter_increment(metrics):
     """Test counter increment."""
-    metrics.increment("test_counter")
+    await metrics.increment("test_counter")
     assert metrics.get_counter("test_counter") == 1.0
 
-    metrics.increment("test_counter", 5.0)
+    await metrics.increment("test_counter", 5.0)
     assert metrics.get_counter("test_counter") == 6.0
 
 
-def test_gauge_set(metrics):
+@pytest.mark.asyncio
+async def test_gauge_set(metrics):
     """Test gauge value setting."""
-    metrics.gauge("test_gauge", 42.0)
+    await metrics.gauge("test_gauge", 42.0)
     assert metrics.get_gauge("test_gauge") == 42.0
 
-    metrics.gauge("test_gauge", 100.0)
+    await metrics.gauge("test_gauge", 100.0)
     assert metrics.get_gauge("test_gauge") == 100.0
 
 
-def test_histogram_observe(metrics):
+@pytest.mark.asyncio
+async def test_histogram_observe(metrics):
     """Test histogram observations."""
     for i in range(100):
-        metrics.observe("test_histogram", float(i))
+        await metrics.observe("test_histogram", float(i))
 
     stats = metrics.get_histogram_stats("test_histogram")
     assert stats["count"] == 100
@@ -72,30 +81,35 @@ def test_histogram_observe(metrics):
     assert stats["p95"] >= 94.0  # 95th percentile
 
 
-def test_timer_context(metrics):
+@pytest.mark.asyncio
+async def test_timer_context(metrics):
     """Test timer context manager."""
-    import time
+    import asyncio
 
     with metrics.time("test_timer"):
-        time.sleep(0.1)
+        await asyncio.sleep(0.1)
 
+    # Wait a bit for the async task to record the metric
+    await asyncio.sleep(0.05)
+    
     stats = metrics.get_histogram_stats("test_timer")
     assert stats["count"] == 1
     assert stats["min"] >= 0.1
 
 
-def test_get_metrics_since(metrics):
+@pytest.mark.asyncio
+async def test_get_metrics_since(metrics):
     """Test retrieving metrics since a timestamp."""
-    metrics.increment("old_metric")
+    await metrics.increment("old_metric")
 
     from datetime import timedelta
 
     recent = datetime.now() - timedelta(hours=1)
 
     # Add new metric
-    metrics.increment("new_metric")
+    await metrics.increment("new_metric")
 
-    recent_metrics = metrics.get_metrics_since(recent)
+    recent_metrics = await metrics.get_metrics_since(recent)
     # Should include both metrics since they're recent
     assert len(recent_metrics) >= 1
 
@@ -103,9 +117,10 @@ def test_get_metrics_since(metrics):
 # AlertManager Tests
 
 
-def test_fire_alert(alerts):
+@pytest.mark.asyncio
+async def test_fire_alert(alerts):
     """Test firing an alert."""
-    alert = alerts.fire(
+    alert = await alerts.fire(
         name="test_alert",
         level=AlertLevel.WARNING,
         message="Test warning message",
@@ -116,29 +131,32 @@ def test_fire_alert(alerts):
     assert alert.level == AlertLevel.WARNING
 
 
-def test_acknowledge_alert(alerts):
+@pytest.mark.asyncio
+async def test_acknowledge_alert(alerts):
     """Test acknowledging an alert."""
-    alert = alerts.fire("test", AlertLevel.INFO, "Test")
+    alert = await alerts.fire("test", AlertLevel.INFO, "Test")
 
-    result = alerts.acknowledge(alert.id)
+    result = await alerts.acknowledge(alert.id)
     assert result is True
 
     # Check it's no longer in active alerts
-    active = alerts.get_active_alerts()
+    active = await alerts.get_active_alerts()
     active_ids = [a.id for a in active]
     assert alert.id not in active_ids
 
 
-def test_get_active_alerts(alerts):
+@pytest.mark.asyncio
+async def test_get_active_alerts(alerts):
     """Test getting active alerts."""
-    alerts.fire("alert1", AlertLevel.INFO, "Test 1")
-    alerts.fire("alert2", AlertLevel.WARNING, "Test 2")
+    await alerts.fire("alert1", AlertLevel.INFO, "Test 1")
+    await alerts.fire("alert2", AlertLevel.WARNING, "Test 2")
 
-    active = alerts.get_active_alerts()
+    active = await alerts.get_active_alerts()
     assert len(active) == 2
 
 
-def test_alert_listeners(alerts):
+@pytest.mark.asyncio
+async def test_alert_listeners(alerts):
     """Test alert listener functionality."""
     received = []
 
@@ -146,25 +164,27 @@ def test_alert_listeners(alerts):
         received.append(alert)
 
     alerts.add_listener(listener)
-    alerts.fire("test", AlertLevel.INFO, "Test message")
+    await alerts.fire("test", AlertLevel.INFO, "Test message")
 
     assert len(received) == 1
     assert received[0].name == "test"
 
 
-def test_get_recent_alerts(alerts):
+@pytest.mark.asyncio
+async def test_get_recent_alerts(alerts):
     """Test getting recent alerts."""
-    alerts.fire("recent1", AlertLevel.INFO, "Test 1")
-    alerts.fire("recent2", AlertLevel.INFO, "Test 2")
+    await alerts.fire("recent1", AlertLevel.INFO, "Test 1")
+    await alerts.fire("recent2", AlertLevel.INFO, "Test 2")
 
-    recent = alerts.get_recent_alerts()
+    recent = await alerts.get_recent_alerts()
     assert len(recent) == 2
 
 
 # Monitor Tests
 
 
-def test_register_health_check(monitor):
+@pytest.mark.asyncio
+async def test_register_health_check(monitor):
     """Test registering a health check."""
 
     def check():
@@ -176,12 +196,13 @@ def test_register_health_check(monitor):
 
     monitor.register_health_check("test_component", check)
 
-    results = monitor.run_health_checks()
+    results = await monitor.run_health_checks()
     assert "test_component" in results
     assert results["test_component"].healthy
 
 
-def test_system_health(monitor):
+@pytest.mark.asyncio
+async def test_system_health(monitor):
     """Test system health check."""
     monitor.register_health_check(
         "healthy_component",
@@ -191,7 +212,7 @@ def test_system_health(monitor):
         ),
     )
 
-    health = monitor.get_system_health()
+    health = await monitor.get_system_health()
     assert health.healthy
 
     # Add failing health check
@@ -204,15 +225,16 @@ def test_system_health(monitor):
         ),
     )
 
-    health = monitor.get_system_health()
+    health = await monitor.get_system_health()
     assert not health.healthy
 
 
-def test_record_task_execution(monitor):
+@pytest.mark.asyncio
+async def test_record_task_execution(monitor):
     """Test recording task execution metrics."""
-    monitor.record_task_execution(True, 1.5, "summary")
-    monitor.record_task_execution(False, 2.0, "translation")
-    monitor.record_task_execution(True, 1.0, "summary")
+    await monitor.record_task_execution(True, 1.5, "summary")
+    await monitor.record_task_execution(False, 2.0, "translation")
+    await monitor.record_task_execution(True, 1.0, "summary")
 
     stats = monitor.metrics.get_histogram_stats("task_duration_seconds")
     assert stats["count"] == 3
@@ -221,7 +243,8 @@ def test_record_task_execution(monitor):
     assert counter == 3
 
 
-def test_get_dashboard_data(monitor):
+@pytest.mark.asyncio
+async def test_get_dashboard_data(monitor):
     """Test getting dashboard data."""
     monitor.register_health_check(
         "test",
@@ -231,7 +254,7 @@ def test_get_dashboard_data(monitor):
         ),
     )
 
-    data = monitor.get_dashboard_data()
+    data = await monitor.get_dashboard_data()
 
     assert "health" in data
     assert "metrics" in data

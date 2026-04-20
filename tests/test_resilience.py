@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 from datetime import datetime, timedelta
 
 from src.core.resilience import (

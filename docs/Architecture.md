@@ -35,10 +35,10 @@
 
 ### 2.2 `src/services`
 
-- `task_tracker.py`: 任务生命周期管理与事件持久化（SQLite）。
+- `task_tracker.py`: 基于 `aiosqlite` 的异步任务生命周期管理与事件持久化。
 - `workflow.py`: DAG 工作流编排与执行。
-- `memory_store.py`: 会话记忆管理与消息持久化。
-- `monitor.py`: 指标收集、健康检查与告警。
+- `memory_store.py`: 基于 `aiosqlite` 的异步会话记忆管理与消息持久化。
+- `monitor.py`: 基于 `aiosqlite` 的异步指标收集、健康检查与告警。
 
 ### 2.3 `src/ui`
 
@@ -74,12 +74,12 @@
 - `.semi_agent/*.db`: 任务、记忆、监控相关 SQLite 数据。
 - `.semi_agent/history.jsonl`: 历史记录。
 
-## 5. Gradio UI 懒加载
+## 5. Gradio UI 懒加载与性能优化
 
-Web UI (`web_app.py`) 采用 Gradio 懒加载优化：
-- `gradio` 模块在 `build_ui()` 函数内部导入，不在模块级别导入
-- 这使得 `perf_check.py` 能准确测量 UI 构建性能
-- 首次 import 耗时从原本计入启动时间改为计入 `build_ui_seconds`
+Web UI (`web_app.py`) 采用多级懒加载优化：
+- **模块级懒加载**: `gradio` 模块在 `build_ui()` 函数内部导入，减少初始 import 耗时。
+- **组件级懒加载**: 采用 `Tab.select()` 事件触发模式。只有当用户点击特定标签页（如“会议纪要”、“董事会报表”、“诊断与日志”）时，系统才会从 SQLite 加载对应数据。
+- **资源级管控**: 强化版 `BrowserPool` 使用单一全局 Playwright 实例，并在进程退出时通过 `atexit` 强制回收，杜绝僵尸进程。
 
 ## 6. 性能基准测试
 

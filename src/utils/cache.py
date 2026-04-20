@@ -7,7 +7,7 @@ Provides LRU cache implementation with TTL support.
 from __future__ import annotations
 
 import functools
-import hashlib
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -17,6 +17,9 @@ from typing import Any, Callable, Dict, Optional, TypeVar, Generic
 T = TypeVar("T")
 K = TypeVar("K")
 V = TypeVar("V")
+
+# Background cleanup interval in seconds (5 minutes)
+_CLEANUP_INTERVAL_SECONDS = 300
 
 
 @dataclass
@@ -48,12 +51,14 @@ class LRUCache(Generic[K, V]):
     - Optional TTL (time-to-live) for entries
     - Thread-safe operations
     - Access statistics
+    - Background cleanup of expired entries
     """
 
     def __init__(
         self,
         max_size: int = 100,
         default_ttl: Optional[float] = None,
+        cleanup_interval: float = _CLEANUP_INTERVAL_SECONDS,
     ) -> None:
         """
         Initialize LRU cache.
@@ -61,6 +66,7 @@ class LRUCache(Generic[K, V]):
         Args:
             max_size: Maximum number of entries
             default_ttl: Default TTL in seconds (None = no expiry)
+            cleanup_interval: Background cleanup interval in seconds
         """
         self._max_size = max_size
         self._default_ttl = default_ttl
@@ -68,6 +74,9 @@ class LRUCache(Generic[K, V]):
         self._lock = Lock()
         self._hits = 0
         self._misses = 0
+        self._cleanup_interval = cleanup_interval
+        self._cleanup_thread: Optional[threading.Thread] = None
+        self._stop_cleanup = threading.Event()
 
     def get(self, key: K) -> Optional[V]:
         """Get value from cache, returns None if not found or expired."""
@@ -156,9 +165,36 @@ class LRUCache(Generic[K, V]):
             "hit_rate": hit_rate,
         }
 
+    def _cleanup_loop(self) -> None:
+        """Background cleanup loop that runs every cleanup_interval seconds."""
+        while not self._stop_cleanup.wait(self._cleanup_interval):
+            try:
+                removed = self.cleanup_expired()
+                if removed > 0:
+                    pass  # Could add logging here if needed
+            except Exception:
+                pass  # Suppress errors in background thread
+
+    def start_background_cleanup(self) -> None:
+        """Start the background cleanup thread."""
+        if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
+            return
+        self._stop_cleanup.clear()
+        self._cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
+        self._cleanup_thread.start()
+
+    def stop_background_cleanup(self) -> None:
+        """Stop the background cleanup thread."""
+        if self._cleanup_thread is None:
+            return
+        self._stop_cleanup.set()
+        self._cleanup_thread.join(timeout=5.0)
+        self._cleanup_thread = None
+
 
 # Global cache instances
 _function_cache: LRUCache[str, Any] = LRUCache(max_size=200, default_ttl=300)
+_function_cache.start_background_cleanup()
 
 
 def cache_result(
@@ -188,8 +224,7 @@ def cache_result(
             if key_func:
                 cache_key = key_func(*args, **kwargs)
             else:
-                key_parts = [func.__name__, repr(args), repr(sorted(kwargs.items()))]
-                cache_key = hashlib.md5("|".join(key_parts).encode()).hexdigest()
+                cache_key = f"{func.__name__}|{repr(args)}|{repr(sorted(kwargs.items()))}"
 
             # Check cache
             cached = _function_cache.get(cache_key)
@@ -225,7 +260,7 @@ def cached(key: str = "", ttl: Optional[float] = None) -> Any:
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            cache_key = hashlib.md5(f"{func.__name__}|{repr(args)}|{repr(sorted(kwargs.items()))}".encode()).hexdigest()
+            cache_key = f"{func.__name__}|{repr(args)}|{repr(sorted(kwargs.items()))}"
             cached_value = _function_cache.get(cache_key)
             if cached_value is not None:
                 return cached_value

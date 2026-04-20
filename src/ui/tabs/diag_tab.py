@@ -54,16 +54,16 @@ def latest_errors() -> str:
     return "\n".join(lines)
 
 
-def health_check() -> str:
+async def health_check() -> str:
     cfg = core.load_config()
 
     # Get task statistics from tracker
     tracker = get_task_tracker()
-    task_stats = tracker.get_statistics()
+    task_stats = await tracker.get_statistics()
 
     # Get memory statistics
     memory = get_memory_store()
-    memory_stats = memory.get_statistics()
+    memory_stats = await memory.get_statistics()
 
     status = {
         "状态目录": str(core.STATE_DIR),

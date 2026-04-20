@@ -17,6 +17,7 @@ $pythonCmd = if (Test-Path ".venv/Scripts/python.exe") { "./.venv/Scripts/python
 
 Invoke-Step "Ruff" { & $pythonCmd -m ruff check . }
 Invoke-Step "Pytest" { & $pythonCmd -m pytest -q }
+Invoke-Step "UI Compatibility Probe" { & $pythonCmd -m pytest tests/test_ui_compatibility.py -q }
 Invoke-Step "perf_check" { & $pythonCmd perf_check.py }
 
 Write-Host "[QualityGate] All checks passed."

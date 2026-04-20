@@ -7,7 +7,7 @@ Defines the Task entity with lifecycle tracking and dependencies.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -45,11 +45,24 @@ class TaskPriority(Enum):
 @dataclass
 class TaskEvent:
     """Represents an event in the task lifecycle."""
+    __slots__ = ["timestamp", "status", "message", "metadata"]
 
-    timestamp: datetime = field(default_factory=datetime.now)
-    status: TaskStatus = TaskStatus.PENDING
-    message: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime
+    status: TaskStatus
+    message: str
+    metadata: Dict[str, Any]
+
+    def __init__(
+        self,
+        status: TaskStatus = TaskStatus.PENDING,
+        message: str = "",
+        timestamp: Optional[datetime] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        self.status = status
+        self.message = message
+        self.timestamp = timestamp or datetime.now()
+        self.metadata = metadata or {}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -72,50 +85,51 @@ class Task:
     - Retry configuration
     - Result storage
     """
+    __slots__ = [
+        "id", "template_key", "user_input", "prompt", "status", "priority",
+        "response", "error", "created_at", "started_at", "completed_at",
+        "duration_seconds", "max_retries", "retry_count", "depends_on",
+        "prev_result", "events", "metadata"
+    ]
 
-    # Core fields
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    template_key: str = "custom"
-    user_input: str = ""
-    prompt: str = ""
+    def __init__(
+        self,
+        id: Optional[str] = None,
+        template_key: str = "custom",
+        user_input: str = "",
+        prompt: str = "",
+        status: TaskStatus = TaskStatus.PENDING,
+        priority: TaskPriority = TaskPriority.NORMAL,
+        max_retries: int = 3,
+        depends_on: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        self.id = id or uuid.uuid4().hex[:8]
+        self.template_key = template_key
+        self.user_input = user_input
+        self.prompt = prompt
+        self.status = status
+        self.priority = priority
+        self.response = ""
+        self.error = None
+        self.created_at = datetime.now()
+        self.started_at = None
+        self.completed_at = None
+        self.duration_seconds = 0.0
+        self.max_retries = max_retries
+        self.retry_count = 0
+        self.depends_on = depends_on or []
+        self.prev_result = ""
+        self.events = []
+        self.metadata = metadata or {}
 
-    # State
-    status: TaskStatus = TaskStatus.PENDING
-    priority: TaskPriority = TaskPriority.NORMAL
-
-    # Results
-    response: str = ""
-    error: Optional[str] = None
-
-    # Timing
-    created_at: datetime = field(default_factory=datetime.now)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    duration_seconds: float = 0.0
-
-    # Retry configuration
-    max_retries: int = 3
-    retry_count: int = 0
-
-    # Dependencies
-    depends_on: List[str] = field(default_factory=list)
-    prev_result: str = ""
-
-    # Event history
-    events: List[TaskEvent] = field(default_factory=list)
-
-    # Additional metadata
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """Record creation event."""
-        if not self.events:
-            self.events.append(
-                TaskEvent(
-                    status=TaskStatus.PENDING,
-                    message="Task created",
-                )
+        # Record creation event
+        self.events.append(
+            TaskEvent(
+                status=TaskStatus.PENDING,
+                message="Task created",
             )
+        )
 
     def add_event(
         self,
@@ -220,21 +234,18 @@ class Task:
     def from_dict(cls, data: Dict[str, Any]) -> "Task":
         """Deserialize task from dictionary."""
         task = cls(
-            id=data.get("id", uuid.uuid4().hex[:8]),
+            id=data.get("id"),
             template_key=data.get("template_key", "custom"),
             user_input=data.get("user_input", ""),
             prompt=data.get("prompt", ""),
             status=TaskStatus(data.get("status", "pending")),
             priority=TaskPriority(data.get("priority", 5)),
-            response=data.get("response", ""),
-            error=data.get("error"),
             max_retries=data.get("max_retries", 3),
-            retry_count=data.get("retry_count", 0),
             depends_on=data.get("depends_on", []),
             metadata=data.get("metadata", {}),
         )
 
-        # Parse timestamps
+        # Parse additional persistent fields
         if data.get("created_at"):
             task.created_at = datetime.fromisoformat(data["created_at"])
         if data.get("started_at"):
@@ -242,6 +253,9 @@ class Task:
         if data.get("completed_at"):
             task.completed_at = datetime.fromisoformat(data["completed_at"])
 
+        task.response = data.get("response", "")
+        task.error = data.get("error")
         task.duration_seconds = data.get("duration_seconds", 0.0)
+        task.retry_count = data.get("retry_count", 0)
 
         return task

@@ -8,7 +8,7 @@ and permission verification.
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta, timezone
 
 # Mock jwt before importing auth modules
@@ -26,12 +26,9 @@ with patch("jwt.encode", MagicMock(return_value="mock_token")):
         ),
     ):
         from src.core.auth import (
-            AuthManager,
             RBACManager,
             Role,
             Permission,
-            User,
-            ROLE_PERMISSIONS,
         )
 
 

@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta, timezone
-import time
 
 # Mock jwt before importing auth modules
 with patch("jwt.encode", MagicMock(return_value="mock_token")):
@@ -32,7 +31,6 @@ with patch("jwt.encode", MagicMock(return_value="mock_token")):
             RBACManager,
             Role,
             Permission,
-            User,
             AuditEvent,
         )
 
@@ -51,7 +49,7 @@ class TestTokenExpiration:
             MagicMock(side_effect=jwt.ExpiredSignatureError("Token expired")),
         ):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 token_expiry=3600,
             )
 
@@ -68,7 +66,7 @@ class TestTokenExpiration:
             MagicMock(side_effect=jwt.ExpiredSignatureError("Token expired")),
         ):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 token_expiry=3600,
             )
 
@@ -92,7 +90,7 @@ class TestTokenExpiration:
             ),
         ):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 token_expiry=1,
             )
             payload = await manager.verify_token("near_expiry_token")
@@ -103,7 +101,7 @@ class TestTokenExpiration:
         """Test creating tokens with zero expiry."""
         with patch("jwt.encode", MagicMock(return_value="zero_expiry_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 token_expiry=0,
             )
             tokens = manager.create_tokens("user123", "testuser", Role.ADMIN)
@@ -118,7 +116,7 @@ class TestTokenRevocation:
     async def test_revoke_token_twice(self):
         """Test revoking the same token twice is idempotent."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -134,7 +132,7 @@ class TestTokenRevocation:
     async def test_revoke_multiple_tokens(self):
         """Test revoking multiple different tokens."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -149,7 +147,7 @@ class TestTokenRevocation:
     async def test_verify_after_partial_revoke(self):
         """Test that non-revoked tokens still work after some are revoked."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -181,7 +179,7 @@ class TestConcurrentAuthentication:
         """Test multiple concurrent authentication attempts."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -209,7 +207,7 @@ class TestConcurrentAuthentication:
     async def test_concurrent_token_verification(self):
         """Test concurrent token verification."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -238,7 +236,7 @@ class TestConcurrentAuthentication:
     async def test_concurrent_revocation(self):
         """Test concurrent token revocation."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -260,7 +258,7 @@ class TestErrorHandling:
     async def test_verify_token_malformed_jwt(self):
         """Test verify_token handles malformed JWT."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -272,7 +270,7 @@ class TestErrorHandling:
     async def test_verify_token_missing_sub_claim(self):
         """Test verify_token handles token with missing sub claim."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -298,7 +296,7 @@ class TestErrorHandling:
         """Test authenticate fails with wrong password."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -318,7 +316,7 @@ class TestErrorHandling:
         """Test authenticate fails with empty password."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -340,7 +338,7 @@ class TestErrorHandling:
 
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -367,7 +365,7 @@ class TestErrorHandling:
 
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -395,7 +393,7 @@ class TestBoundaryConditions:
     async def test_verify_token_empty_string(self):
         """Test verify_token handles empty string token."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -406,7 +404,7 @@ class TestBoundaryConditions:
     async def test_verify_token_unicode(self):
         """Test verify_token handles unicode token."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -430,7 +428,7 @@ class TestBoundaryConditions:
         """Test creating user with short password (no min enforcement)."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -449,7 +447,7 @@ class TestBoundaryConditions:
         """Test creating user with very long password (no max enforcement)."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -475,14 +473,14 @@ class TestBoundaryConditions:
 
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
 
             # Empty username - system may allow or reject
             try:
-                user = await manager.create_user(
+                await manager.create_user(
                     username="",
                     email="test@example.com",
                     password="validPassword123",
@@ -500,7 +498,7 @@ class TestBoundaryConditions:
         """Test creating user with special characters in username."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -523,7 +521,7 @@ class TestBoundaryConditions:
         """Test get_audit_logs with no filters returns events."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -536,7 +534,7 @@ class TestBoundaryConditions:
         """Test get_audit_logs with limit parameter."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -559,7 +557,7 @@ class TestBoundaryConditions:
     async def test_token_blacklist_growth(self):
         """Test token blacklist handles many entries."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -615,7 +613,7 @@ class TestSecurityScenarios:
         """Test that inactive users cannot authenticate."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -641,8 +639,8 @@ class TestSecurityScenarios:
     @pytest.mark.asyncio
     async def test_token_with_wrong_secret(self):
         """Test that tokens signed with different secret are rejected."""
-        manager1 = AuthManager(secret_key="secret1", token_expiry=3600)
-        manager2 = AuthManager(secret_key="secret2", token_expiry=3600)
+        manager1 = AuthManager(secret_key="key1_at_least_32_chars_long_aaaa", token_expiry=3600)
+        manager2 = AuthManager(secret_key="key2_at_least_32_chars_long_bbbb", token_expiry=3600)
 
         # Create token with manager1
         tokens = manager1.create_tokens("user123", "testuser", Role.ADMIN)
@@ -659,7 +657,7 @@ class TestSecurityScenarios:
     async def test_refresh_token_cannot_access_protected_resource(self):
         """Test that refresh tokens cannot access protected resources."""
         manager = AuthManager(
-            secret_key="test_secret",
+            secret_key="test_secret_key_at_least_32_chars_long",
             token_expiry=3600,
         )
 
@@ -688,7 +686,7 @@ class TestAuthManagerEdgeCases:
         """Test creating tokens for different roles."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -704,7 +702,7 @@ class TestAuthManagerEdgeCases:
         """Test recording multiple audit events."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
@@ -726,12 +724,12 @@ class TestAuthManagerEdgeCases:
         """Test user can be found after creation via authenticate."""
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )
 
-            created_user = await manager.create_user(
+            await manager.create_user(
                 username="findme",
                 email="findme@example.com",
                 password="testPassword123",
@@ -749,7 +747,7 @@ class TestAuthManagerEdgeCases:
 
         with patch("jwt.encode", MagicMock(return_value="mock_token")):
             manager = AuthManager(
-                secret_key="test_secret",
+                secret_key="test_secret_key_at_least_32_chars_long",
                 db_path=tmp_path / "test.db",
                 token_expiry=3600,
             )

@@ -1,5 +1,5 @@
 """
-Monitoring and Alerting Service
+Monitoring and Alerting Service (Async)
 
 Provides system monitoring with:
 - Metrics collection
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
+import aiosqlite
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -98,7 +98,7 @@ class HealthStatus:
 
 class MetricsCollector:
     """
-    Collects and aggregates metrics.
+    Collects and aggregates metrics (Async).
 
     Features:
     - Counter, gauge, and histogram metrics
@@ -124,14 +124,12 @@ class MetricsCollector:
         self._gauges: Dict[str, float] = {}
         self._histograms: Dict[str, List[float]] = defaultdict(list)
 
-        self._init_db()
-
-    def _init_db(self) -> None:
-        """Initialize metrics database."""
+    async def initialize(self) -> None:
+        """Initialize metrics database asynchronously."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute("""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT,
@@ -141,41 +139,42 @@ class MetricsCollector:
                     tags TEXT
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(name)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_time ON metrics(timestamp)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(name)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_time ON metrics(timestamp)")
+            await conn.commit()
 
-    def increment(
+    async def increment(
         self,
         name: str,
         value: float = 1.0,
         tags: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Increment a counter metric."""
+        """Increment a counter metric (Async)."""
         self._counters[name] += value
-        self._record_metric(name, value, MetricType.COUNTER, tags or {})
+        await self._record_metric(name, value, MetricType.COUNTER, tags or {})
 
-    def gauge(
+    async def gauge(
         self,
         name: str,
         value: float,
         tags: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Set a gauge metric value."""
+        """Set a gauge metric value (Async)."""
         self._gauges[name] = value
-        self._record_metric(name, value, MetricType.GAUGE, tags or {})
+        await self._record_metric(name, value, MetricType.GAUGE, tags or {})
 
-    def observe(
+    async def observe(
         self,
         name: str,
         value: float,
         tags: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Record an observation for histogram metrics."""
+        """Record an observation for histogram metrics (Async)."""
         self._histograms[name].append(value)
-        self._record_metric(name, value, MetricType.HISTOGRAM, tags or {})
+        await self._record_metric(name, value, MetricType.HISTOGRAM, tags or {})
 
     def time(self, name: str, tags: Optional[Dict[str, str]] = None):
-        """Context manager to time an operation."""
+        """Context manager to time an operation (Async compatible)."""
 
         class Timer:
             def __init__(self, collector: "MetricsCollector", n: str, t: Optional[Dict[str, str]]):
@@ -190,20 +189,30 @@ class MetricsCollector:
 
             def __exit__(self, *args):
                 elapsed = time.perf_counter() - self.start
-                self.collector.observe(self.name, elapsed, self.tags)
+                import asyncio
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(self.collector.observe(self.name, elapsed, self.tags))
+                    else:
+                        asyncio.run(self.collector.observe(self.name, elapsed, self.tags))
+                except Exception:
+                    # Fallback for complex environments
+                    pass
 
         return Timer(self, name, tags)
 
-    def _record_metric(
+    async def _record_metric(
         self,
         name: str,
         value: float,
         metric_type: MetricType,
         tags: Dict[str, str],
     ) -> None:
-        """Record metric to database."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute(
+        """Record metric to database (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute(
                 "INSERT INTO metrics (name, value, type, timestamp, tags) VALUES (?, ?, ?, ?, ?)",
                 (
                     name,
@@ -213,6 +222,7 @@ class MetricsCollector:
                     json.dumps(tags),
                 ),
             )
+            await conn.commit()
 
     def get_counter(self, name: str) -> float:
         """Get current counter value."""
@@ -240,25 +250,27 @@ class MetricsCollector:
             "p95": sorted_values[min(p95_idx, count - 1)],
         }
 
-    def get_metrics_since(
+    async def get_metrics_since(
         self,
         since: datetime,
         name_prefix: Optional[str] = None,
     ) -> List[Metric]:
-        """Get metrics recorded since a timestamp."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        """Get metrics recorded since a timestamp (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
 
             if name_prefix:
-                cursor = conn.execute(
+                async with conn.execute(
                     "SELECT * FROM metrics WHERE timestamp >= ? AND name LIKE ? ORDER BY timestamp",
                     (since.isoformat(), f"{name_prefix}%"),
-                )
+                ) as cursor:
+                    rows = await cursor.fetchall()
             else:
-                cursor = conn.execute(
+                async with conn.execute(
                     "SELECT * FROM metrics WHERE timestamp >= ? ORDER BY timestamp",
                     (since.isoformat(),),
-                )
+                ) as cursor:
+                    rows = await cursor.fetchall()
 
             return [
                 Metric(
@@ -268,13 +280,13 @@ class MetricsCollector:
                     timestamp=datetime.fromisoformat(row["timestamp"]),
                     tags=json.loads(row["tags"] or "{}"),
                 )
-                for row in cursor.fetchall()
+                for row in rows
             ]
 
 
 class AlertManager:
     """
-    Manages alerts and notifications.
+    Manages alerts and notifications (Async).
 
     Features:
     - Alert level thresholds
@@ -297,14 +309,13 @@ class AlertManager:
             self._db_path = get_config_manager().state_dir / "alerts.db"
 
         self._listeners: List[Callable[[Alert], None]] = []
-        self._init_db()
 
-    def _init_db(self) -> None:
-        """Initialize alerts database."""
+    async def initialize(self) -> None:
+        """Initialize alerts database asynchronously."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute("""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS alerts (
                     id TEXT PRIMARY KEY,
                     name TEXT,
@@ -315,20 +326,21 @@ class AlertManager:
                     metadata TEXT
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts(timestamp)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts(timestamp)")
+            await conn.commit()
 
     def add_listener(self, callback: Callable[[Alert], None]) -> None:
         """Add an alert listener."""
         self._listeners.append(callback)
 
-    def fire(
+    async def fire(
         self,
         name: str,
         level: AlertLevel,
         message: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Alert:
-        """Fire an alert."""
+        """Fire an alert (Async)."""
         import uuid
 
         alert = Alert(
@@ -340,8 +352,8 @@ class AlertManager:
         )
 
         # Persist
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute(
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute(
                 "INSERT INTO alerts (id, name, level, message, timestamp, acknowledged, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     alert.id,
@@ -353,6 +365,7 @@ class AlertManager:
                     json.dumps(alert.metadata),
                 ),
             )
+            await conn.commit()
 
         # Notify listeners
         for listener in self._listeners:
@@ -363,20 +376,22 @@ class AlertManager:
 
         return alert
 
-    def acknowledge(self, alert_id: str) -> bool:
-        """Acknowledge an alert."""
-        with sqlite3.connect(self._db_path) as conn:
-            cursor = conn.execute("UPDATE alerts SET acknowledged = 1 WHERE id = ?", (alert_id,))
-            return cursor.rowcount > 0
+    async def acknowledge(self, alert_id: str) -> bool:
+        """Acknowledge an alert (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            async with conn.execute("UPDATE alerts SET acknowledged = 1 WHERE id = ?", (alert_id,)) as cursor:
+                await conn.commit()
+                return cursor.rowcount > 0
 
-    def get_active_alerts(self, limit: int = 50) -> List[Alert]:
-        """Get unacknowledged alerts."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
+    async def get_active_alerts(self, limit: int = 50) -> List[Alert]:
+        """Get unacknowledged alerts (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
                 "SELECT * FROM alerts WHERE acknowledged = 0 ORDER BY timestamp DESC LIMIT ?",
                 (limit,),
-            )
+            ) as cursor:
+                rows = await cursor.fetchall()
 
             return [
                 Alert(
@@ -388,23 +403,24 @@ class AlertManager:
                     acknowledged=bool(row["acknowledged"]),
                     metadata=json.loads(row["metadata"] or "{}"),
                 )
-                for row in cursor.fetchall()
+                for row in rows
             ]
 
-    def get_recent_alerts(
+    async def get_recent_alerts(
         self,
         since: Optional[datetime] = None,
         limit: int = 100,
     ) -> List[Alert]:
-        """Get recent alerts."""
+        """Get recent alerts (Async)."""
         since = since or datetime.now() - timedelta(hours=24)
 
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
                 "SELECT * FROM alerts WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
                 (since.isoformat(), limit),
-            )
+            ) as cursor:
+                rows = await cursor.fetchall()
 
             return [
                 Alert(
@@ -416,13 +432,13 @@ class AlertManager:
                     acknowledged=bool(row["acknowledged"]),
                     metadata=json.loads(row["metadata"] or "{}"),
                 )
-                for row in cursor.fetchall()
+                for row in rows
             ]
 
 
 class Monitor:
     """
-    Comprehensive system monitoring.
+    Comprehensive system monitoring (Async).
 
     Combines metrics collection, alerting, and health checks.
     """
@@ -432,6 +448,11 @@ class Monitor:
         self.alerts = AlertManager(state_dir=state_dir)
         self._health_checks: Dict[str, Callable[[], HealthStatus]] = {}
 
+    async def initialize(self) -> None:
+        """Initialize monitor components asynchronously."""
+        await self.metrics.initialize()
+        await self.alerts.initialize()
+
     def register_health_check(
         self,
         component: str,
@@ -440,12 +461,17 @@ class Monitor:
         """Register a health check function."""
         self._health_checks[component] = check_func
 
-    def run_health_checks(self) -> Dict[str, HealthStatus]:
-        """Run all health checks."""
+    async def run_health_checks(self) -> Dict[str, HealthStatus]:
+        """Run all health checks (Async)."""
         results = {}
         for component, check_func in self._health_checks.items():
             try:
-                results[component] = check_func()
+                import inspect
+
+                if inspect.iscoroutinefunction(check_func):
+                    results[component] = await check_func()
+                else:
+                    results[component] = check_func()
             except Exception as e:
                 results[component] = HealthStatus(
                     component=component,
@@ -454,9 +480,9 @@ class Monitor:
                 )
         return results
 
-    def get_system_health(self) -> HealthStatus:
-        """Get overall system health."""
-        checks = self.run_health_checks()
+    async def get_system_health(self) -> HealthStatus:
+        """Get overall system health (Async)."""
+        checks = await self.run_health_checks()
         healthy = all(c.healthy for c in checks.values())
 
         failed = [name for name, status in checks.items() if not status.healthy]
@@ -469,19 +495,19 @@ class Monitor:
             details={name: status.message for name, status in checks.items()},
         )
 
-    def record_task_execution(
+    async def record_task_execution(
         self,
         success: bool,
         duration_seconds: float,
         template: str,
     ) -> None:
-        """Record task execution metrics."""
-        self.metrics.increment("tasks_total", tags={"status": "success" if success else "failed"})
-        self.metrics.observe("task_duration_seconds", duration_seconds, tags={"template": template})
+        """Record task execution metrics (Async)."""
+        await self.metrics.increment("tasks_total", tags={"status": "success" if success else "failed"})
+        await self.metrics.observe("task_duration_seconds", duration_seconds, tags={"template": template})
 
-    def get_dashboard_data(self) -> Dict[str, Any]:
-        """Get data for monitoring dashboard."""
-        health = self.get_system_health()
+    async def get_dashboard_data(self) -> Dict[str, Any]:
+        """Get data for monitoring dashboard (Async)."""
+        health = await self.get_system_health()
         duration_stats = self.metrics.get_histogram_stats("task_duration_seconds")
 
         return {
@@ -494,5 +520,5 @@ class Monitor:
                 "tasks_total": self.metrics.get_counter("tasks_total"),
                 "task_duration": duration_stats,
             },
-            "active_alerts": len(self.alerts.get_active_alerts()),
+            "active_alerts": len(await self.alerts.get_active_alerts()),
         }

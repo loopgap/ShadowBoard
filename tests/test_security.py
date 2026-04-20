@@ -7,9 +7,6 @@ Tests input validation, auth flows, and encryption operations.
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, patch
-import tempfile
-import os
 
 from src.core.security import (
     InputValidator,

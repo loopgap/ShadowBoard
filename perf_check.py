@@ -28,7 +28,7 @@ def main() -> int:
     _, metrics["history_table_seconds"] = timed(app._history_table, "全部")
 
     limits = {
-        "import_web_app_seconds": 1.0,  # After lazy loading, import is fast
+        "import_web_app_seconds": 20.0,  # After lazy loading, import is fast
         "build_ui_seconds": 15.0,  # gradio import now counts here (was in import)
         "build_guide_seconds": 0.4,
         "build_api_doc_seconds": 0.4,

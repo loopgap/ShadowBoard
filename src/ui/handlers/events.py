@@ -4,39 +4,65 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import functools
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, List, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import gradio as gr
+    pass
 
 import main as core
 from src.core.session import (
-    get_login_lock,
     get_last_input_lock,
-    LOGIN_STATE,
-    LAST_INPUT,
 )
 from src.core.config import (
     provider_label_from_config,
     provider_guide_text,
-    apply_provider,
 )
 from src.utils.cache import cache_result
-from src.core.templates import (
+from src.ui.state import (
     KEY_TO_TEMPLATE_LABEL,
     PROVIDER_LABEL_TO_KEY,
     PROVIDERS,
     TEMPLATE_GUIDE,
     TEMPLATE_LABEL_TO_KEY,
+    LOGIN_STATE,
+    LAST_INPUT,
+    get_login_lock,
 )
 from src.utils.i18n import t
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_error(error_msg: str) -> str:
+    """Remove sensitive paths and information from error messages.
+
+    Replaces absolute file paths with placeholder to prevent leaking
+    system-specific path information.
+    """
+    import re
+
+    # Replace URLs first to avoid being affected by path regexes
+    error_msg = re.sub(r"https?://\S+", "<URL>", error_msg)
+    # Replace Windows-style absolute paths (e.g., D:\folder\file)
+    error_msg = re.sub(r"[A-Za-z]:\\[\w\\]+", "<PATH>", error_msg)
+    # Replace Unix-style absolute paths (e.g., /home/user/folder)
+    # Use negative lookbehind to avoid matching :// (URL protocol)
+    error_msg = re.sub(r"(?<!:)/[\w/]+", "<PATH>", error_msg)
+    return error_msg
+
+
+@dataclass
+class ValidationResult:
+    """Result of input validation with border color feedback."""
+
+    is_valid: bool
+    border_color: str  # CSS color for border
+    message: str
 
 
 # Backward compatibility aliases for functions moved to config.py
@@ -149,6 +175,70 @@ def _input_tip(user_input: str) -> str:
     return f"输入长度 {length} 字 内容质量正常 可直接执行"
 
 
+def _validate_task_input(user_input: str) -> Tuple[str, str]:
+    """Validate task input and return tip with border color class.
+
+    Returns:
+        Tuple of (tip_message, border_color_class)
+    """
+    text = (user_input or "").strip()
+    length = len(text)
+
+    if length == 0:
+        return "输入提示 请粘贴正文或直接写需求", "border-empty"
+    if length < 20:
+        return f"输入长度 {length} 字 建议补充上下文 结果会更稳定", "border-warning"
+    if length > 6000:
+        return f"输入长度 {length} 字 内容较长 建议分段执行", "border-warning"
+    return f"输入长度 {length} 字 内容质量正常 可直接执行", "border-valid"
+
+
+def _validate_target_url(url: str) -> Tuple[str, str]:
+    """Validate target URL and return status with border color class.
+
+    Returns:
+        Tuple of (status_message, border_color_class)
+    """
+    text = (url or "").strip()
+    if not text:
+        return "目标网址 不能为空", "border-error"
+
+    # Basic URL format check
+    if not text.startswith(("http://", "https://")):
+        return "目标网址 必须以 http:// 或 https:// 开头", "border-error"
+
+    if len(text) < 10:
+        return "目标网址 长度不足", "border-error"
+
+    return "目标网址 格式正确", "border-valid"
+
+
+def _validate_max_retries(value: int) -> Tuple[str, str]:
+    """Validate max retries value.
+
+    Returns:
+        Tuple of (status_message, border_color_class)
+    """
+    if value < 1:
+        return "重试次数 不能小于1", "border-error"
+    if value > 6:
+        return "重试次数 最大为6", "border-error"
+    return "重试次数 格式正确", "border-valid"
+
+
+def _validate_response_timeout(value: int) -> Tuple[str, str]:
+    """Validate response timeout value.
+
+    Returns:
+        Tuple of (status_message, border_color_class)
+    """
+    if value < 30:
+        return "超时时间 不能小于30秒", "border-error"
+    if value > 600:
+        return "超时时间 最大为600秒", "border-error"
+    return "超时时间 格式正确", "border-valid"
+
+
 def _history_table(filter_mode: str = "全部") -> List[List[Any]]:
     rows = core.read_history(limit=120)
     out: List[List[Any]] = []
@@ -171,7 +261,9 @@ def _history_table(filter_mode: str = "全部") -> List[List[Any]]:
     return out
 
 
-def _clear_history() -> Tuple[str, List[List[Any]]]:
+def _clear_history(clear_confirm: bool) -> Tuple[str, List[List[Any]]]:
+    if not clear_confirm:
+        return "请先勾选 确认清空历史 再点击清空按钮", _history_table("全部")
     core.HISTORY_PATH.write_text("", encoding="utf-8")
     return "历史记录已清空", _history_table("全部")
 
@@ -184,17 +276,18 @@ def _latest_errors() -> str:
     for fp in files[:5]:
         lines.append(f"[{fp.name}]")
         try:
-            lines.append(fp.read_text(encoding="utf-8")[:800])
+            raw_error = fp.read_text(encoding="utf-8")[:800]
+            lines.append(_sanitize_error(raw_error))
         except Exception as exc:
-            lines.append(f"读取失败 {exc}")
+            lines.append(f"读取失败 {_sanitize_error(str(exc))}")
         lines.append("")
     return "\n".join(lines)
 
 
-def _health_check() -> str:
+async def _health_check() -> str:
     cfg = core.load_config()
-    task_stats = _get_task_tracker().get_statistics()
-    memory_stats = _get_memory_store().get_statistics()
+    task_stats = await _get_task_tracker().get_statistics()
+    memory_stats = await _get_memory_store().get_statistics()
     status = {
         "状态目录": str(core.STATE_DIR),
         "登录目录存在": core.PROFILE_DIR.exists(),
@@ -211,14 +304,12 @@ def _health_check() -> str:
     return json.dumps(status, ensure_ascii=False, indent=2)
 
 
-@functools.lru_cache(maxsize=1)
 def _get_task_tracker():
     from src.core.dependencies import get_task_tracker
 
     return get_task_tracker()
 
 
-@functools.lru_cache(maxsize=1)
 def _get_memory_store():
     from src.core.dependencies import get_memory_store
 
@@ -305,7 +396,7 @@ async def _open_login_browser() -> Tuple[str, str]:
     except Exception as exc:
         await _close_login_session()
         return (
-            t("errors.browser_open_failed", error=str(exc)),
+            t("errors.browser_open_failed", error=_sanitize_error(str(exc))),
             _build_guide_markdown(),
         )
 
@@ -369,10 +460,10 @@ async def _run_smoke_test(smoke_confirm: bool, smoke_pause_seconds: int) -> Tupl
                 "response_chars": 0,
                 "duration_seconds": elapsed,
                 "ok": False,
-                "error": str(exc),
+                "error": _sanitize_error(str(exc)),
             }
         )
-        return t("errors.smoke_test_failed", elapsed=elapsed, error=str(exc)), _build_guide_markdown()
+        return t("errors.smoke_test_failed", elapsed=elapsed, error=_sanitize_error(str(exc))), _build_guide_markdown()
 
 
 async def _one_click_prepare() -> Tuple[str, str]:
@@ -426,12 +517,14 @@ async def _run_task(template_label: str, user_input: str, confirmed: bool):
 
     started = time.time()
     response = ""
+    timeout_seconds = int(run_cfg.get("response_timeout_seconds", 120))
     try:
         async for chunk in core.send_with_retry(run_cfg, prompt):
             response = chunk
             elapsed = round(time.time() - started, 2)
+            progress = min(95, int((elapsed / timeout_seconds) * 100))
             yield (
-                f"执行中... 用时 {elapsed} 秒，收到 {len(response)} 字",
+                f"执行中... {progress}% 用时 {elapsed} 秒，收到 {len(response)} 字",
                 prompt[:3000],
                 response,
                 _input_tip(raw_input),
@@ -461,11 +554,11 @@ async def _run_task(template_label: str, user_input: str, confirmed: bool):
                 "response_chars": len(response),
                 "duration_seconds": elapsed,
                 "ok": False,
-                "error": str(exc),
+                "error": _sanitize_error(str(exc)),
             }
         )
         yield (
-            t("errors.execution_failed", elapsed=elapsed, error=str(exc)),
+            t("errors.execution_failed", elapsed=elapsed, error=_sanitize_error(str(exc))),
             prompt[:3000],
             response,
             _input_tip(raw_input),

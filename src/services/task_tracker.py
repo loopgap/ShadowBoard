@@ -1,5 +1,5 @@
 """
-Task Tracking Service
+Task Tracking Service (Async)
 
 Provides comprehensive task lifecycle tracking with:
 - State transitions
@@ -13,20 +13,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sqlite3
-
-logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-
-# Import from models
 import sys
 
+import aiosqlite
+
+# Import from models
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.models.task import Task, TaskStatus, TaskPriority
+
+logger = logging.getLogger(__name__)
 
 
 class TaskTrackerEvent(Enum):
@@ -53,10 +53,10 @@ class TaskListener:
 
 class TaskTracker:
     """
-    Comprehensive task tracking and management.
+    Comprehensive task tracking and management (Async).
 
     Features:
-    - SQLite persistence
+    - SQLite persistence via aiosqlite
     - Event-driven notifications
     - Dependency resolution
     - Statistics aggregation
@@ -82,15 +82,12 @@ class TaskTracker:
         self._listeners: List[TaskListener] = []
         self._lock = asyncio.Lock()
 
-        # Initialize database
-        self._init_db()
-
-    def _init_db(self) -> None:
-        """Initialize SQLite database schema."""
+    async def initialize(self) -> None:
+        """Initialize SQLite database schema asynchronously."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute("""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     template_key TEXT,
@@ -111,7 +108,7 @@ class TaskTracker:
                 )
             """)
 
-            conn.execute("""
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS task_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT,
@@ -124,9 +121,10 @@ class TaskTracker:
             """)
 
             # Create indexes
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task_id ON task_events(task_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task_id ON task_events(task_id)")
+            await conn.commit()
 
     def _emit(self, event: TaskTrackerEvent, task: Task) -> None:
         """Emit event to listeners."""
@@ -164,19 +162,7 @@ class TaskTracker:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Task:
         """
-        Create a new task.
-
-        Args:
-            template_key: Template identifier
-            user_input: Raw user input
-            prompt: Processed prompt
-            priority: Task priority
-            depends_on: List of task IDs this depends on
-            max_retries: Maximum retry attempts
-            metadata: Additional metadata
-
-        Returns:
-            Created Task object
+        Create a new task (Async).
         """
         task = Task(
             template_key=template_key,
@@ -190,32 +176,32 @@ class TaskTracker:
 
         async with self._lock:
             self._tasks[task.id] = task
-            self._persist_task(task)
+            await self._persist_task(task)
 
         self._emit(TaskTrackerEvent.TASK_CREATED, task)
         return task
 
     async def get_task(self, task_id: str) -> Optional[Task]:
-        """Get task by ID."""
+        """Get task by ID (Async)."""
         # Check cache first
         if task_id in self._tasks:
             return self._tasks[task_id]
 
         # Load from database
-        task = self._load_task(task_id)
+        task = await self._load_task(task_id)
         if task:
             self._tasks[task_id] = task
         return task
 
     async def update_task(self, task: Task) -> None:
-        """Update task state."""
+        """Update task state (Async)."""
         async with self._lock:
             self._tasks[task.id] = task
-            self._persist_task(task)
-            self._persist_events(task)
+            await self._persist_task(task)
+            await self._persist_events(task)
 
     async def start_task(self, task_id: str) -> bool:
-        """Start a task execution."""
+        """Start a task execution (Async)."""
         task = await self.get_task(task_id)
         if not task:
             return False
@@ -234,7 +220,7 @@ class TaskTracker:
         task_id: str,
         response: str,
     ) -> bool:
-        """Mark task as completed."""
+        """Mark task as completed (Async)."""
         task = await self.get_task(task_id)
         if not task:
             return False
@@ -249,7 +235,7 @@ class TaskTracker:
         task_id: str,
         error: str,
     ) -> bool:
-        """Mark task as failed."""
+        """Mark task as failed (Async)."""
         task = await self.get_task(task_id)
         if not task:
             return False
@@ -269,7 +255,7 @@ class TaskTracker:
         task_id: str,
         reason: str = "",
     ) -> bool:
-        """Cancel a task."""
+        """Cancel a task (Async)."""
         task = await self.get_task(task_id)
         if not task or task.is_terminal:
             return False
@@ -283,7 +269,7 @@ class TaskTracker:
         self,
         limit: int = 100,
     ) -> List[Task]:
-        """Get all pending tasks sorted by priority."""
+        """Get all pending tasks sorted by priority (Async)."""
         tasks = []
         async with self._lock:
             for task in self._tasks.values():
@@ -295,21 +281,21 @@ class TaskTracker:
         return tasks[:limit]
 
     async def get_running_tasks(self) -> List[Task]:
-        """Get all currently running tasks."""
+        """Get all currently running tasks (Async)."""
         return [t for t in self._tasks.values() if t.status == TaskStatus.RUNNING]
 
     async def _check_dependencies(self, task: Task) -> bool:
-        """Check if all dependencies are satisfied."""
+        """Check if all dependencies are satisfied (Async)."""
         for dep_id in task.depends_on:
             dep = await self.get_task(dep_id)
             if not dep or dep.status != TaskStatus.COMPLETED:
                 return False
         return True
 
-    def _persist_task(self, task: Task) -> None:
-        """Persist task to database."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute(
+    async def _persist_task(self, task: Task) -> None:
+        """Persist task to database (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute(
                 """
                 INSERT OR REPLACE INTO tasks (
                     id, template_key, user_input, prompt, status, priority,
@@ -336,12 +322,13 @@ class TaskTracker:
                     json.dumps(task.metadata),
                 ),
             )
+            await conn.commit()
 
-    def _persist_events(self, task: Task) -> None:
-        """Persist task events to database."""
-        with sqlite3.connect(self._db_path) as conn:
+    async def _persist_events(self, task: Task) -> None:
+        """Persist task events to database (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
             for event in task.events[-10:]:  # Only last 10 events
-                conn.execute(
+                await conn.execute(
                     """
                     INSERT OR IGNORE INTO task_events (
                         task_id, timestamp, status, message, metadata
@@ -355,16 +342,17 @@ class TaskTracker:
                         json.dumps(event.metadata),
                     ),
                 )
+            await conn.commit()
 
-    def _load_task(self, task_id: str) -> Optional[Task]:
-        """Load task from database."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
+    async def _load_task(self, task_id: str) -> Optional[Task]:
+        """Load task from database (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
                 "SELECT * FROM tasks WHERE id = ?",
                 (task_id,),
-            )
-            row = cursor.fetchone()
+            ) as cursor:
+                row = await cursor.fetchone()
 
             if not row:
                 return None
@@ -396,17 +384,20 @@ class TaskTracker:
 
             return task
 
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get task statistics."""
-        with sqlite3.connect(self._db_path) as conn:
-            total = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-            completed = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'completed'").fetchone()[0]
-            failed = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'failed'").fetchone()[0]
-            running = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'").fetchone()[0]
+    async def get_statistics(self) -> Dict[str, Any]:
+        """Get task statistics (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            async with conn.execute("SELECT COUNT(*) FROM tasks") as cursor:
+                total = (await cursor.fetchone())[0]
+            async with conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'completed'") as cursor:
+                completed = (await cursor.fetchone())[0]
+            async with conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'failed'") as cursor:
+                failed = (await cursor.fetchone())[0]
+            async with conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'") as cursor:
+                running = (await cursor.fetchone())[0]
 
-            avg_duration = (
-                conn.execute("SELECT AVG(duration_seconds) FROM tasks WHERE status = 'completed'").fetchone()[0] or 0
-            )
+            async with conn.execute("SELECT AVG(duration_seconds) FROM tasks WHERE status = 'completed'") as cursor:
+                avg_duration = (await cursor.fetchone())[0] or 0
 
             return {
                 "total_tasks": total,
@@ -416,3 +407,8 @@ class TaskTracker:
                 "success_rate": completed / total if total > 0 else 0,
                 "avg_duration_seconds": round(avg_duration, 2),
             }
+
+    async def vacuum(self) -> None:
+        """Maintenance: Compact database file."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("VACUUM")

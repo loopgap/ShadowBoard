@@ -5,7 +5,6 @@ Tests that launch actual Chromium browser via Playwright.
 These tests verify real browser automation without mocks.
 """
 
-import pytest
 from playwright.sync_api import sync_playwright
 
 

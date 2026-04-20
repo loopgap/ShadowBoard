@@ -7,7 +7,7 @@ Defines the Session entity for conversation context management.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -25,11 +25,24 @@ class SessionState(Enum):
 @dataclass
 class Message:
     """Represents a single message in a session."""
+    __slots__ = ["role", "content", "timestamp", "metadata"]
 
-    role: str  # "user" or "assistant"
+    role: str
     content: str
-    timestamp: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime
+    metadata: Dict[str, Any]
+
+    def __init__(
+        self,
+        role: str,
+        content: str,
+        timestamp: Optional[datetime] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        self.role = role
+        self.content = content
+        self.timestamp = timestamp or datetime.now()
+        self.metadata = metadata or {}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -44,8 +57,8 @@ class Message:
         return cls(
             role=data["role"],
             content=data["content"],
-            timestamp=(datetime.fromisoformat(data["timestamp"]) if data.get("timestamp") else datetime.now()),
-            metadata=data.get("metadata", {}),
+            timestamp=(datetime.fromisoformat(data["timestamp"]) if data.get("timestamp") else None),
+            metadata=data.get("metadata"),
         )
 
 
@@ -60,28 +73,32 @@ class Session:
     - Context summarization
     - Provider association
     """
+    __slots__ = [
+        "id", "title", "provider_key", "state", "messages", "summary",
+        "summary_created_at", "created_at", "updated_at", "last_message_at",
+        "metadata"
+    ]
 
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    title: str = ""
-    provider_key: str = "deepseek"
-
-    # State
-    state: SessionState = SessionState.ACTIVE
-
-    # Messages
-    messages: List[Message] = field(default_factory=list)
-
-    # Context summary (for long conversations)
-    summary: str = ""
-    summary_created_at: Optional[datetime] = None
-
-    # Timing
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
-    last_message_at: Optional[datetime] = None
-
-    # Metadata
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    def __init__(
+        self,
+        id: Optional[str] = None,
+        title: str = "",
+        provider_key: str = "deepseek",
+        state: SessionState = SessionState.ACTIVE,
+        summary: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        self.id = id or uuid.uuid4().hex[:8]
+        self.title = title
+        self.provider_key = provider_key
+        self.state = state
+        self.messages = []
+        self.summary = summary
+        self.summary_created_at = None
+        self.created_at = datetime.now()
+        self.updated_at = datetime.now()
+        self.last_message_at = None
+        self.metadata = metadata or {}
 
     def add_message(
         self,
@@ -169,7 +186,7 @@ class Session:
     def from_dict(cls, data: Dict[str, Any]) -> "Session":
         """Deserialize session from dictionary."""
         session = cls(
-            id=data.get("id", uuid.uuid4().hex[:8]),
+            id=data.get("id"),
             title=data.get("title", ""),
             provider_key=data.get("provider_key", "deepseek"),
             state=SessionState(data.get("state", "active")),

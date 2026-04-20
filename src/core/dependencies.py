@@ -77,3 +77,51 @@ def get_monitor() -> Monitor:
             if _monitor is None:
                 _monitor = Monitor()
     return _monitor
+
+
+async def initialize_services() -> None:
+    """Initialize all services asynchronously and perform maintenance."""
+    # 1. Basic initialization
+    await get_task_tracker().initialize()
+    await get_memory_store().initialize()
+    await get_monitor().initialize()
+    if hasattr(get_workflow_engine(), "initialize"):
+        await get_workflow_engine().initialize()  # type: ignore
+
+    # 2. Run maintenance tasks
+    await run_maintenance()
+
+
+async def run_maintenance() -> None:
+    """Perform resource cleanup and optimization."""
+    from src.core.config import get_config_manager
+    import time
+
+    config = get_config_manager()
+    
+    # A. Clean old error snapshots (> 7 days)
+    error_dir = config.error_dir
+    if error_dir.exists():
+        now = time.time()
+        for f in error_dir.glob("error_*"):
+            if now - f.stat().st_mtime > 7 * 24 * 3600:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+    # B. Compact databases
+    try:
+        await get_task_tracker().vacuum()
+        await get_memory_store().vacuum()
+    except Exception:
+        pass
+
+    # C. Log workspace status to monitor
+    try:
+        monitor = get_monitor()
+        # Estimate storage (rough)
+        storage_bytes = sum(f.stat().st_size for f in config.state_dir.rglob('*') if f.is_file())
+        await monitor.metrics.gauge("workspace_storage_mb", round(storage_bytes / (1024 * 1024), 2))
+    except Exception:
+        pass

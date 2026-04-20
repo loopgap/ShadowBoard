@@ -1,11 +1,12 @@
 """
-Browser Connection Pool - 企业级浏览器资源管理
+Browser Connection Pool - 企业级浏览器资源管理 (强化版)
 
 提供:
 - 浏览器实例池化
 - 自动资源回收
 - 健康检查
 - 故障自愈
+- 严格的资源生命周期管理 (防止僵尸进程)
 """
 
 from __future__ import annotations
@@ -86,7 +87,7 @@ class BrowserPoolConfig:
 
 
 class BrowserPool:
-    """企业级浏览器连接池"""
+    """企业级浏览器连接池 (强化资源管理版)"""
 
     def __init__(
         self,
@@ -100,6 +101,9 @@ class BrowserPool:
         self._in_use = set()
         self._all_browsers = []
         self._metrics = {}
+
+        # Playwright 核心对象
+        self._playwright = None
 
         # 同步机制
         self._lock = asyncio.Lock()
@@ -118,9 +122,14 @@ class BrowserPool:
                 return
 
             try:
+                from playwright.async_api import async_playwright
+
+                # 启动全局 Playwright 实例
+                self._playwright = await async_playwright().start()
+
                 # 创建最小数量的浏览器
                 for _ in range(self.config.min_size):
-                    browser = await self._create_browser()
+                    browser = await self._create_browser_instance()
                     self._all_browsers.append(browser)
                     await self._available.put(browser)
 
@@ -134,15 +143,18 @@ class BrowserPool:
 
             except Exception as e:
                 logger.error(f"Failed to initialize browser pool: {e}")
+                # 尝试部分清理
+                if self._playwright:
+                    await self._playwright.stop()
                 raise
 
-    async def _create_browser(self):
-        """创建单个浏览器实例"""
-        from playwright.async_api import async_playwright
+    async def _create_browser_instance(self):
+        """创建单个浏览器实例 (内部方法)"""
+        if not self._playwright:
+            raise RuntimeError("Playwright not initialized")
 
         try:
-            playwright = await async_playwright().start()
-            browser = await asyncio.wait_for(playwright.chromium.launch(headless=True), timeout=30.0)
+            browser = await asyncio.wait_for(self._playwright.chromium.launch(headless=True), timeout=30.0)
 
             self._metrics[id(browser)] = BrowserMetrics()
             logger.debug(f"Created browser instance {id(browser)}")
@@ -157,7 +169,12 @@ class BrowserPool:
     @asynccontextmanager
     async def acquire(self) -> AsyncGenerator:
         """获取浏览器实例"""
+        if not self._initialized:
+            await self.initialize()
+
         await self._init_event.wait()
+        if self._closed:
+            raise RuntimeError("Browser pool is closed")
 
         browser = None
 
@@ -172,17 +189,8 @@ class BrowserPool:
             if not await self._is_healthy(browser):
                 logger.warning(f"Browser {id(browser)} is unhealthy, creating replacement")
                 await self._destroy_browser(browser)
-                browser = await self._create_browser()
-
-            # 执行健康检查
-            try:
-                await asyncio.wait_for(self._verify_browser(browser), timeout=5.0)
-            except Exception as e:
-                logger.warning(f"Browser health check failed: {e}")
-                metrics = self._metrics.get(id(browser))
-                if metrics:
-                    metrics.record_error()
-                raise
+                browser = await self._create_browser_instance()
+                self._all_browsers.append(browser)
 
             # 标记为使用中
             self._in_use.add(id(browser))
@@ -195,32 +203,33 @@ class BrowserPool:
 
         except Exception as e:
             logger.error(f"Error acquiring browser: {e}")
+            if browser:
+                # 如果发生异常，销毁该浏览器以确保安全
+                await self._destroy_browser(browser)
+                browser = None
             raise
 
         finally:
             # 尝试归还或销毁
-            if browser:
+            if browser and not self._closed:
                 self._in_use.discard(id(browser))
 
                 try:
                     metrics = self._metrics.get(id(browser))
-                    if metrics:
-                        # 检查是否超过重用次数
-                        if metrics.times_used >= self.config.max_reuse_count:
-                            logger.info(
-                                f"Browser {id(browser)} reached max reuse count, destroying and creating new instance"
-                            )
-                            await self._destroy_browser(browser)
-                            if len(self._all_browsers) < self.config.min_size:
-                                new_browser = await self._create_browser()
-                                self._all_browsers.append(new_browser)
-                                await self._available.put(new_browser)
-                        else:
-                            # 归还到池
-                            await self._available.put(browser)
-
+                    if metrics and metrics.times_used >= self.config.max_reuse_count:
+                        logger.info(f"Browser {id(browser)} reached max reuse, replacing")
+                        await self._destroy_browser(browser)
+                        # 补充实例以维持最小规模
+                        if len(self._all_browsers) < self.config.min_size:
+                            new_browser = await self._create_browser_instance()
+                            self._all_browsers.append(new_browser)
+                            await self._available.put(new_browser)
+                    else:
+                        # 归还到池
+                        await self._available.put(browser)
                 except Exception as e:
                     logger.error(f"Error returning browser to pool: {e}")
+                    await self._destroy_browser(browser)
 
     async def _is_healthy(self, browser) -> bool:
         """检查浏览器健康状态"""
@@ -229,55 +238,35 @@ class BrowserPool:
             if not metrics or not metrics.is_healthy():
                 return False
 
-            # 检查浏览器是否仍有效
             if not browser.is_connected():
                 return False
 
             return True
-
         except Exception:
             return False
-
-    async def _verify_browser(self, browser):
-        """验证浏览器可用性"""
-        try:
-            # 简单的活动测试
-            page = await browser.new_page()
-            await page.evaluate("1 + 1")
-            await page.close()
-        except Exception as e:
-            raise RuntimeError(t("errors.browser_verification_failed", error=str(e)))
 
     async def _destroy_browser(self, browser):
         """销毁浏览器实例"""
         try:
-            # 关闭所有页面
-            for context in browser.contexts:
-                for page in context.pages:
-                    try:
-                        await page.close()
-                    except Exception as e:
-                        logger.warning(f"Failed to close page: {e}")
-                try:
-                    await context.close()
-                except Exception as e:
-                    logger.warning(f"Failed to close context: {e}")
+            browser_id = id(browser)
+            # 关闭浏览器 (Playwright 会自动关闭关联的 contexts 和 pages)
+            await asyncio.wait_for(browser.close(), timeout=10.0)
 
-            # 关闭浏览器
-            await browser.close()
-
-            # 清理指标
-            metrics_id = id(browser)
-            if metrics_id in self._metrics:
-                del self._metrics[metrics_id]
+            # 清理状态
+            if browser_id in self._metrics:
+                del self._metrics[browser_id]
 
             if browser in self._all_browsers:
                 self._all_browsers.remove(browser)
 
-            logger.debug(f"Destroyed browser instance {metrics_id}")
+            self._in_use.discard(browser_id)
 
+            logger.debug(f"Destroyed browser instance {browser_id}")
         except Exception as e:
-            logger.error(f"Error destroying browser: {e}")
+            logger.error(f"Error destroying browser {id(browser)}: {e}")
+            # 即使报错也尝试从列表中移除
+            if browser in self._all_browsers:
+                self._all_browsers.remove(browser)
 
     async def _health_check_loop(self):
         """后台健康检查"""
@@ -285,28 +274,19 @@ class BrowserPool:
             try:
                 await asyncio.sleep(self.config.health_check_interval)
 
-                # 检查所有浏览器
-                unhealthy = []
-                for browser in self._all_browsers:
-                    if id(browser) not in self._in_use:
-                        if not await self._is_healthy(browser):
-                            unhealthy.append(browser)
+                async with self._lock:
+                    unhealthy = []
+                    for browser in self._all_browsers:
+                        if id(browser) not in self._in_use:
+                            if not await self._is_healthy(browser):
+                                unhealthy.append(browser)
 
-                # 销毁不健康的浏览器
-                for browser in unhealthy:
-                    try:
+                    for browser in unhealthy:
                         await self._destroy_browser(browser)
-
-                        # 创建替换实例
                         if len(self._all_browsers) < self.config.min_size:
-                            replacement = await self._create_browser()
+                            replacement = await self._create_browser_instance()
                             self._all_browsers.append(replacement)
                             await self._available.put(replacement)
-                    except Exception as e:
-                        logger.error(f"Error during health check: {e}")
-
-                if unhealthy:
-                    logger.info(f"Health check: replaced {len(unhealthy)} unhealthy browsers")
 
             except asyncio.CancelledError:
                 break
@@ -319,29 +299,22 @@ class BrowserPool:
             try:
                 await asyncio.sleep(self.config.idle_timeout)
 
-                # 清理长时间未使用的浏览器
-                current_time = datetime.now()
-                to_remove = []
+                async with self._lock:
+                    current_time = datetime.now()
+                    to_remove = []
 
-                for i, browser in enumerate(self._all_browsers):
-                    if id(browser) in self._in_use:
-                        continue
+                    for browser in self._all_browsers:
+                        if id(browser) in self._in_use:
+                            continue
 
-                    metrics = self._metrics.get(id(browser))
-                    if metrics:
-                        idle_time = (current_time - metrics.last_used).total_seconds()
-                        if idle_time > self.config.idle_timeout:
-                            to_remove.append((i, browser))
+                        metrics = self._metrics.get(id(browser))
+                        if metrics:
+                            idle_time = (current_time - metrics.last_used).total_seconds()
+                            if idle_time > self.config.idle_timeout and len(self._all_browsers) > self.config.min_size:
+                                to_remove.append(browser)
 
-                # 移除和替换
-                for _, browser in reversed(to_remove):
-                    try:
+                    for browser in to_remove:
                         await self._destroy_browser(browser)
-                    except Exception as e:
-                        logger.error(f"Error cleaning up browser: {e}")
-
-                if to_remove:
-                    logger.info(f"Cleanup: removed {len(to_remove)} idle browsers")
 
             except asyncio.CancelledError:
                 break
@@ -350,43 +323,38 @@ class BrowserPool:
 
     async def get_stats(self) -> dict:
         """获取池统计信息"""
-        total_browsers = len(self._all_browsers)
-        available = self._available.qsize()
-        in_use = len(self._in_use)
-
         return {
-            "total": total_browsers,
-            "available": available,
-            "in_use": in_use,
-            "config": {
-                "min_size": self.config.min_size,
-                "max_size": self.config.max_size,
-            },
-            "metrics": {id_: vars(m) for id_, m in self._metrics.items()},
+            "total": len(self._all_browsers),
+            "available": self._available.qsize(),
+            "in_use": len(self._in_use),
+            "metrics": {str(id_): vars(m) for id_, m in self._metrics.items()},
         }
 
     async def close(self):
-        """关闭浏览器池"""
+        """关闭浏览器池并释放所有资源"""
         async with self._lock:
             if self._closed:
                 return
 
             self._closed = True
+            logger.info("Closing browser pool...")
 
-            # 取消后台任务
+            # 1. 取消后台任务
             if self._health_check_task:
                 self._health_check_task.cancel()
             if self._cleanup_task:
                 self._cleanup_task.cancel()
 
-            # 等待任务完成
-            await asyncio.gather(self._health_check_task, self._cleanup_task, return_exceptions=True)
+            # 2. 销毁所有浏览器实例
+            for browser in list(self._all_browsers):
+                await self._destroy_browser(browser)
 
-            # 销毁所有浏览器
-            for browser in self._all_browsers[:]:
+            # 3. 停止 Playwright 核心 (至关重要: 防止僵尸进程)
+            if self._playwright:
                 try:
-                    await self._destroy_browser(browser)
+                    await self._playwright.stop()
+                    self._playwright = None
                 except Exception as e:
-                    logger.error(f"Error closing browser: {e}")
+                    logger.error(f"Error stopping Playwright: {e}")
 
-            logger.info("Browser pool closed")
+            logger.info("Browser pool closed successfully")

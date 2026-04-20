@@ -204,7 +204,7 @@ def build_ui():
                         workflow_status = gr.Textbox(label="议程状态", lines=1)
                     workflow_result = gr.Textbox(label="最终决策报告/汇总", lines=10)
 
-            with gr.Tab("💾 会议纪要 (记忆)"):
+            with gr.Tab("💾 会议纪要 (记忆)") as memory_tab_item:
                 with gr.Group(elem_classes=["section-card"]):
                     gr.Markdown("<div class='section-title'>董事会历史会话</div>")
                     with gr.Row():
@@ -225,7 +225,7 @@ def build_ui():
                     session_context = gr.Textbox(label="董事会对话历史", lines=8, interactive=False)
                     memory_stats_box = gr.Textbox(label="存储统计", lines=3)
 
-            with gr.Tab("📈 董事会报表"):
+            with gr.Tab("📈 董事会报表") as monitor_tab_item:
                 with gr.Group(elem_classes=["section-card"]):
                     gr.Markdown("<div class='section-title'>决策效率监控</div>")
                     with gr.Row():
@@ -240,7 +240,7 @@ def build_ui():
                         metrics_tasks_btn = gr.Button("成功率统计", elem_classes=["action-secondary"])
                     metrics_display = gr.Textbox(label="指标数据", lines=10)
 
-        with gr.Tab("🛠️ 诊断与日志"):
+        with gr.Tab("🛠️ 诊断与日志") as diag_tab_item:
             with gr.Group(elem_classes=["section-card"]):
                 with gr.Row():
                     history_filter = gr.Radio(choices=HISTORY_FILTERS, value="全部", label="结果过滤")
@@ -363,7 +363,7 @@ def build_ui():
         refresh_doc_btn.click(fn=help_tab.build_api_doc_text, outputs=[api_doc_box])
         export_doc_btn.click(fn=help_tab.export_api_doc, outputs=[api_doc_file, api_doc_status])
 
-        # --- Global Load Events ---
+        # --- Global Load Events (Lazy Loading) ---
         demo.load(
             fn=setup_tab.load_config_for_form,
             outputs=[
@@ -379,11 +379,15 @@ def build_ui():
                 api_doc_box,
             ],
         )
-        demo.load(fn=diag_tab.history_table, inputs=[history_filter], outputs=[history_grid])
+
+        # Tab selection based lazy loading
+        diag_tab_item.select(fn=diag_tab.history_table, inputs=[history_filter], outputs=[history_grid])
+        memory_tab_item.select(fn=memory_tab.list_sessions, outputs=[session_list])
+        memory_tab_item.select(fn=memory_tab.get_memory_statistics, outputs=[memory_stats_box])
+        monitor_tab_item.select(fn=monitor_tab.get_dashboard_data, outputs=[dashboard_data])
+        
+        # Keep queue grid as it's small or needed for status
         demo.load(fn=queue_tab.render_queue_table, outputs=[q_grid])
-        demo.load(fn=memory_tab.list_sessions, outputs=[session_list])
-        demo.load(fn=monitor_tab.get_dashboard_data, outputs=[dashboard_data])
-        demo.load(fn=memory_tab.get_memory_statistics, outputs=[memory_stats_box])
 
         gr.HTML(
             """

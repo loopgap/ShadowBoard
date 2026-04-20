@@ -6,10 +6,8 @@ Tests token management, session validation, RBAC, and audit logging.
 
 from __future__ import annotations
 
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-import tempfile
+from unittest.mock import MagicMock, patch
 import os
 from datetime import datetime, timedelta, timezone
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List
 
-from src.core.templates import PROVIDERS, PROVIDER_LABEL_TO_KEY, TEMPLATE_LABEL_TO_KEY
+from src.core.templates import PROVIDERS, TEMPLATE_LABEL_TO_KEY
 
 # Provider labels for dropdown
 PROVIDER_LABELS: List[str] = [v["label"] for v in PROVIDERS.values()]
@@ -135,6 +135,26 @@ footer, #footer, .gradio-container .footer, [data-testid='footer'] { display: no
   border: 1px solid #cbd5e1 !important;
   border-radius: 10px !important;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04) !important;
+}
+
+/* Input validation border colors */
+.border-valid {
+  border-color: #22c55e !important;
+  border-width: 2px !important;
+}
+
+.border-warning {
+  border-color: #f59e0b !important;
+  border-width: 2px !important;
+}
+
+.border-error {
+  border-color: #ef4444 !important;
+  border-width: 2px !important;
+}
+
+.border-empty {
+  border-color: #94a3b8 !important;
 }
 
 .gradio-container .prose,

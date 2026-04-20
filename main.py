@@ -1,14 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import sys
 import textwrap
-import asyncio
 import time
 import traceback
-
-logger = logging.getLogger(__name__)
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,7 +15,14 @@ from typing import Any, Dict, List, Optional
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
+from src.core.dependencies import initialize_services
+from src.core.templates import TEMPLATES
 from src.utils.i18n import t
+
+logger = logging.getLogger(__name__)
+
+# History file size limit for rolling (10MB)
+HISTORY_MAX_SIZE_BYTES = 10 * 1024 * 1024
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / ".semi_agent"
@@ -54,8 +60,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "smoke_pause_seconds": 3,
 }
 
-from src.core.templates import TEMPLATES
-
 
 def ensure_state() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -92,24 +96,58 @@ def save_config(config: Dict[str, Any]) -> None:
 
 
 def append_history(entry: Dict[str, Any]) -> None:
+    # Check if rolling is needed before appending
+    if HISTORY_PATH.exists():
+        file_size = HISTORY_PATH.stat().st_size
+        if file_size >= HISTORY_MAX_SIZE_BYTES:
+            _roll_history()
     with HISTORY_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
 
-def read_history(limit: int = 10) -> List[Dict[str, Any]]:
-    """Read recent history entries with efficient reverse iteration.
+def _roll_history() -> None:
+    """Roll history file by renaming current to timestamped backup."""
+    if not HISTORY_PATH.exists():
+        return
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = HISTORY_PATH.parent / f"history_{timestamp}.jsonl"
+    HISTORY_PATH.rename(backup_path)
+    HISTORY_PATH.touch()
+    logger.info(f"History rolled to {backup_path.name}")
 
-    Optimized to collect only limit entries, avoiding unnecessary parsing.
+
+def read_history(limit: int = 10) -> List[Dict[str, Any]]:
+    """Read recent history entries using efficient file tail reading.
+
+    Optimized to read only from the end of file, avoiding full file load.
     """
     if not HISTORY_PATH.exists():
         return []
     rows: List[Dict[str, Any]] = []
 
+    # Read file from end using tail approach
     with HISTORY_PATH.open("r", encoding="utf-8") as f:
+        # Seek to end to get file size
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+
+        if file_size == 0:
+            return []
+
+        # Calculate position to start reading (estimate ~200 bytes per line)
+        avg_line_size = 200
+        read_size = min(limit * avg_line_size + 100, file_size)
+        start_pos = max(0, file_size - read_size)
+
+        # Read from calculated position
+        f.seek(start_pos)
+        if start_pos > 0:
+            # Skip potentially partial first line
+            f.readline()
+
         lines = f.readlines()
 
-    # Use deque-like pattern: iterate in reverse and stop early
-    # This avoids parsing entries beyond the limit
+    # Iterate in reverse and stop early
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -307,7 +345,7 @@ async def send_once(config: Dict[str, Any], prompt: str):
         ):
             yield chunk
     except Exception as exc:
-        logger.debug(f"Send failed: {exc}")
+        logger.error(f"Send failed: {exc}")
         if page is not None:
             debug_path = await save_error_snapshot(page, exc)
             raise RuntimeError(t("errors.task_failed_debug", path=debug_path)) from exc
@@ -457,6 +495,9 @@ async def quick_setup(config: Dict[str, Any]) -> Dict[str, Any]:
 
 async def async_main() -> None:
     ensure_state()
+    # Initialize async services
+    await initialize_services()
+
     config = load_config()
 
     while True:

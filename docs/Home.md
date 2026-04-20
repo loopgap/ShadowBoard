@@ -13,20 +13,19 @@
 ## 2. 架构与实现
 
 - [系统架构总览](Architecture.md)
+- [进阶架构方案 (Advanced)](Architecture-Advanced.md)
 - [核心服务说明](Services.md)
 - [工作流引擎说明](Workflows.md)
 - [API 参考](API-Reference.md)
-- [开发与维护](Development.md)
+- [开发与维护指南](Development.md)
+- [实施与部署指南](Implementation.md)
 
-## 3. 企业升级文档归档
+## 3. 归档与备份
 
-以下文档是历史阶段的企业化规划与交付记录，已统一归档，避免根目录混乱：
+以下文档为历史阶段的规划与交付记录，已统一归档至 `docs/archive/`：
 
-- [企业文档导航](enterprise/00_START_HERE.md)
-- [企业架构升级方案](enterprise/ARCHITECTURE_ENTERPRISE_UPGRADE.md)
-- [实施指南](enterprise/IMPLEMENTATION_GUIDE.md)
-- [升级摘要](enterprise/ENTERPRISE_UPGRADE_SUMMARY.md)
-- [交付清单](enterprise/DELIVERY_SUMMARY.md)
+- [交付总结与升级摘要](archive/DELIVERY_SUMMARY.md)
+- [企业级升级摘要](archive/ENTERPRISE_UPGRADE_SUMMARY.md)
 
 ---
 

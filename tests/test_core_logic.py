@@ -259,7 +259,8 @@ async def test_send_with_retry_logic(monkeypatch):
     monkeypatch.setattr(main, "send_once", fake_send_once)
 
     results = []
-    async for chunk in main.send_with_retry(config, "test"):
+    async_gen = main.send_with_retry(config, "test")
+    async for chunk in async_gen:
         results.append(chunk)
 
     assert call_count == 2
@@ -273,53 +274,56 @@ async def test_send_with_retry_exhausted(monkeypatch):
 
     async def fake_send_once_fail(cfg, prompt):
         raise RuntimeError("always fail")
-        yield ""
+        if False:
+            yield ""
 
     monkeypatch.setattr(main, "send_once", fake_send_once_fail)
 
     with pytest.raises(RuntimeError, match="always fail"):
-        async for _ in main.send_with_retry(config, "test"):
+        async_gen = main.send_with_retry(config, "test")
+        async for _ in async_gen:
             pass
 
 
 # ============== Tests for new services ==============
 
 
-def test_task_tracker_basic(tmp_path):
+@pytest.mark.asyncio
+async def test_task_tracker_basic(tmp_path):
     """Test TaskTracker basic functionality."""
     from src.services.task_tracker import TaskTracker
     from src.models.task import TaskStatus
 
     tmpdir = tmp_path
     tracker = TaskTracker(state_dir=tmpdir)
+    await tracker.initialize()
 
-    async def run_test():
-        task = await tracker.create_task(template_key="custom", user_input="Test input")
-        assert task.status == TaskStatus.PENDING
+    task = await tracker.create_task(template_key="custom", user_input="Test input")
+    assert task.status == TaskStatus.PENDING
 
-        await tracker.start_task(task.id)
-        updated = await tracker.get_task(task.id)
-        assert updated.status == TaskStatus.RUNNING
+    await tracker.start_task(task.id)
+    updated = await tracker.get_task(task.id)
+    assert updated.status == TaskStatus.RUNNING
 
-        await tracker.complete_task(task.id, "Test response")
-        completed = await tracker.get_task(task.id)
-        assert completed.status == TaskStatus.COMPLETED
-
-    asyncio.run(run_test())
+    await tracker.complete_task(task.id, "Test response")
+    completed = await tracker.get_task(task.id)
+    assert completed.status == TaskStatus.COMPLETED
 
 
-def test_memory_store_basic(tmp_path):
+@pytest.mark.asyncio
+async def test_memory_store_basic(tmp_path):
     """Test MemoryStore basic functionality."""
     from src.services.memory_store import MemoryStore
 
     tmpdir = tmp_path
     store = MemoryStore(state_dir=tmpdir)
+    await store.initialize()
 
-    session = store.create_session(title="Test Session")
+    session = await store.create_session(title="Test Session")
     assert session.title == "Test Session"
 
-    store.add_message(session.id, "user", "Hello!")
-    context = store.get_context(session.id)
+    await store.add_message(session.id, "user", "Hello!")
+    context = await store.get_context(session.id)
     assert len(context) == 1
     assert context[0]["content"] == "Hello!"
 
@@ -356,16 +360,18 @@ def test_workflow_engine_basic():
     assert any(w.id == "test_basic" for w in workflows)
 
 
-def test_monitor_basic():
+@pytest.mark.asyncio
+async def test_monitor_basic(tmp_path):
     """Test Monitor basic functionality."""
     from src.services.monitor import Monitor
 
-    monitor = Monitor()
+    monitor = Monitor(state_dir=tmp_path)
+    await monitor.initialize()
 
-    monitor.metrics.increment("test_counter", 5)
+    await monitor.metrics.increment("test_counter", 5)
     assert monitor.metrics.get_counter("test_counter") == 5.0
 
-    monitor.metrics.gauge("test_gauge", 42.0)
+    await monitor.metrics.gauge("test_gauge", 42.0)
     assert monitor.metrics.get_gauge("test_gauge") == 42.0
 
 

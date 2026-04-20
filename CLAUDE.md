@@ -14,10 +14,13 @@ pip install -e .
 playwright install chromium
 ```
 
-### Test Commands
+### Test & Quality Commands
 
 ```powershell
-# Run tests
+# Run quality gate (lint + test + perf + compatibility)
+.\quality_gate.ps1
+
+# Run tests directly
 pytest
 
 # Run with coverage
@@ -49,9 +52,10 @@ test_mcp/
 
 ### Key Technologies
 
-- **Automation**: Playwright
-- **Web UI**: Gradio
-- **HTTP Client**: httpx
+- **Automation**: Playwright (Async)
+- **Web UI**: Gradio (with Lazy Loading)
+- **Async DB**: aiosqlite
+- **Async IO**: aiofiles, httpx
 - **Testing**: pytest, pytest-asyncio, pytest-mock
 
 ### Known Issues

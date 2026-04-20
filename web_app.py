@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import Any, Dict
+import sys
 
+import gradio as gr
 import main as core
 from src.core.templates import (
     EXAMPLE_INPUTS,
-    KEY_TO_TEMPLATE_LABEL,
-    PROVIDER_LABEL_TO_KEY,
     PROVIDERS,
-    TEMPLATE_LABEL_TO_KEY,
 )
 from src.ui.components.selectors import (
     CUSTOM_CSS,
@@ -41,16 +39,6 @@ from src.ui.handlers.events import (
     _run_smoke_test,
     _save_config_from_form,
     _template_help,
-    _provider_label_from_config,
-    _provider_guide_text,
-    _profile_has_login_data,
-    _history_has_success,
-    _close_login_session,
-    _get_task_tracker,
-    _get_memory_store,
-    get_login_lock,
-    LOGIN_STATE,
-    LAST_INPUT,
 )
 from src.services.queue import (
     add_to_queue,
@@ -58,6 +46,7 @@ from src.services.queue import (
     process_queue_once,
     render_queue_table,
 )
+from src.core.dependencies import initialize_services
 
 EXPORT_DIR = core.STATE_DIR / "exports"
 DOCS_DIR = core.STATE_DIR / "docs"
@@ -80,8 +69,6 @@ def _pick_available_port(start: int = 7860, end: int = 7875) -> int:
 
 def build_ui() -> "gr.Blocks":
     """Build the Gradio UI layout."""
-    import gradio as gr
-
     with gr.Blocks(title="网页 AI 半自动助手") as demo:
         gr.HTML(get_hero_html())
 
@@ -194,6 +181,7 @@ def build_ui() -> "gr.Blocks":
                 )
 
                 with gr.Row():
+                    clear_confirm = gr.Checkbox(value=False, label="确认清空历史")
                     clear_history_btn = gr.Button("清空历史", elem_classes=["action-secondary"])
                     health_btn = gr.Button("健康检查", elem_classes=["action-secondary"])
                     error_btn = gr.Button("查看最近错误日志", elem_classes=["action-secondary"])
@@ -280,7 +268,7 @@ def build_ui() -> "gr.Blocks":
         refresh_guide_btn.click(fn=_build_guide_markdown, outputs=[guide_markdown])
         refresh_history_btn.click(fn=_history_table, inputs=[history_filter], outputs=[history_grid])
         history_filter.change(fn=_history_table, inputs=[history_filter], outputs=[history_grid])
-        clear_history_btn.click(fn=_clear_history, outputs=[diag_box, history_grid])
+        clear_history_btn.click(fn=_clear_history, inputs=[clear_confirm], outputs=[diag_box, history_grid])
         health_btn.click(fn=_health_check, outputs=[diag_box])
         error_btn.click(fn=_latest_errors, outputs=[diag_box])
 
@@ -316,19 +304,28 @@ def build_ui() -> "gr.Blocks":
 
 
 def main() -> None:
-    import gradio as gr
-
-    _ensure_dirs()
-    app = build_ui()
-    app.queue(default_concurrency_limit=1)
-    port = _pick_available_port(7860, 7875)
-    app.launch(
-        server_name="127.0.0.1",
-        server_port=port,
-        inbrowser=True,
-        theme=gr.themes.Soft(),
-        css=CUSTOM_CSS,
-    )
+    try:
+        _ensure_dirs()
+        # Initialize async services (DB, etc.)
+        asyncio.run(initialize_services())
+        
+        app = build_ui()
+        app.queue(default_concurrency_limit=1)
+        port = _pick_available_port(7860, 7875)
+        print(f"Starting ShadowBoard UI on http://127.0.0.1:{port}")
+        app.launch(
+            server_name="127.0.0.1",
+            server_port=port,
+            inbrowser=True,
+            theme=gr.themes.Soft(),
+            css=CUSTOM_CSS,
+        )
+    except KeyboardInterrupt:
+        print("Shutdown requested by user")
+    except Exception as e:
+        print(f"ERROR: Failed to start application: {e}", file=sys.stderr)
+        print("Please check if port 7860 is available or another instance is running.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

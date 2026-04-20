@@ -1,5 +1,5 @@
 """
-Memory Storage Service
+Memory Storage Service (Async)
 
 Provides conversation memory management with:
 - Session-based memory storage
@@ -11,7 +11,8 @@ Provides conversation memory management with:
 from __future__ import annotations
 
 import json
-import sqlite3
+import aiosqlite
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,14 +26,17 @@ from src.utils.i18n import t
 
 class MemoryStore:
     """
-    Manages conversation memory and sessions.
+    Manages conversation memory and sessions (Async version).
 
     Features:
-    - SQLite persistence
+    - SQLite persistence via aiosqlite
     - Session management
     - Message history
     - Context window management
+    - LRU cache eviction (max 100 sessions in memory)
     """
+
+    MAX_SESSIONS = 100
 
     def __init__(
         self,
@@ -48,17 +52,15 @@ class MemoryStore:
 
             self._db_path = get_config_manager().state_dir / "memory.db"
 
-        self._sessions: Dict[str, Session] = {}
+        self._sessions: OrderedDict[str, Session] = OrderedDict()
         self._current_session_id: Optional[str] = None
 
-        self._init_db()
-
-    def _init_db(self) -> None:
-        """Initialize database schema."""
+    async def initialize(self) -> None:
+        """Initialize database schema asynchronously."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute("""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY,
                     title TEXT,
@@ -72,7 +74,7 @@ class MemoryStore:
                 )
             """)
 
-            conn.execute("""
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT,
@@ -84,93 +86,106 @@ class MemoryStore:
                 )
             """)
 
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)")
+            await conn.commit()
 
-    def create_session(
+    def _evict_if_needed(self) -> None:
+        """LRU eviction: remove oldest session when over limit."""
+        while len(self._sessions) > self.MAX_SESSIONS:
+            self._sessions.popitem(last=False)
+
+    def set_session(self, session_id: str, session: Session) -> None:
+        """Set session with LRU eviction."""
+        if session_id in self._sessions:
+            del self._sessions[session_id]
+        self._sessions[session_id] = session
+        self._evict_if_needed()
+
+    async def create_session(
         self,
         title: str = "",
         provider_key: str = "deepseek",
     ) -> Session:
-        """Create a new session."""
+        """Create a new session (Async)."""
         session = Session(
             title=title,
             provider_key=provider_key,
         )
-        self._sessions[session.id] = session
-        self._persist_session(session)
+        self.set_session(session.id, session)
+        await self._persist_session(session)
         return session
 
-    def get_session(self, session_id: str) -> Optional[Session]:
-        """Get session by ID."""
+    async def get_session(self, session_id: str) -> Optional[Session]:
+        """Get session by ID (Async)."""
         if session_id in self._sessions:
             return self._sessions[session_id]
 
-        session = self._load_session(session_id)
+        session = await self._load_session(session_id)
         if session:
-            self._sessions[session_id] = session
+            self.set_session(session_id, session)
         return session
 
-    def get_current_session(self) -> Optional[Session]:
-        """Get the current active session."""
+    async def get_current_session(self) -> Optional[Session]:
+        """Get the current active session (Async)."""
         if self._current_session_id:
-            return self.get_session(self._current_session_id)
+            return await self.get_session(self._current_session_id)
         return None
 
-    def set_current_session(self, session_id: str) -> bool:
-        """Set the current active session."""
-        session = self.get_session(session_id)
+    async def set_current_session(self, session_id: str) -> bool:
+        """Set the current active session (Async)."""
+        session = await self.get_session(session_id)
         if session:
             self._current_session_id = session_id
             return True
         return False
 
-    def add_message(
+    async def add_message(
         self,
         session_id: str,
         role: str,
         content: str,
         **metadata: Any,
     ) -> Optional[Message]:
-        """Add a message to a session."""
-        session = self.get_session(session_id)
+        """Add a message to a session (Async)."""
+        session = await self.get_session(session_id)
         if not session:
             return None
 
         message = session.add_message(role, content, **metadata)
-        self._persist_message(session_id, message)
-        self._persist_session(session)
+        await self._persist_message(session_id, message)
+        await self._persist_session(session)
         return message
 
-    def get_context(
+    async def get_context(
         self,
         session_id: str,
         max_messages: int = 20,
     ) -> List[Dict[str, str]]:
         """
-        Get conversation context for AI input.
+        Get conversation context for AI input (Async).
 
         Returns list of {role, content} dicts.
         """
-        session = self.get_session(session_id)
+        session = await self.get_session(session_id)
         if not session:
             return []
 
         messages = session.get_context_window(max_messages)
         return [{"role": m.role, "content": m.content} for m in messages]
 
-    def search_messages(
+    async def search_messages(
         self,
         query: str,
         session_id: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Search messages by content."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        """Search messages by content (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
 
             if session_id:
-                cursor = conn.execute(
+                async with conn.execute(
                     """
                     SELECT * FROM messages
                     WHERE session_id = ? AND content LIKE ?
@@ -178,9 +193,10 @@ class MemoryStore:
                     LIMIT ?
                 """,
                     (session_id, f"%{query}%", limit),
-                )
+                ) as cursor:
+                    rows = await cursor.fetchall()
             else:
-                cursor = conn.execute(
+                async with conn.execute(
                     """
                     SELECT * FROM messages
                     WHERE content LIKE ?
@@ -188,29 +204,32 @@ class MemoryStore:
                     LIMIT ?
                 """,
                     (f"%{query}%", limit),
-                )
+                ) as cursor:
+                    rows = await cursor.fetchall()
 
-            return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in rows]
 
-    def list_sessions(
+    async def list_sessions(
         self,
         state: Optional[SessionState] = None,
         limit: int = 50,
     ) -> List[Session]:
-        """List sessions, optionally filtered by state."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        """List sessions, optionally filtered by state (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
 
             if state:
-                cursor = conn.execute(
+                async with conn.execute(
                     "SELECT * FROM sessions WHERE state = ? ORDER BY updated_at DESC LIMIT ?",
                     (state.value, limit),
-                )
+                ) as cursor:
+                    rows = await cursor.fetchall()
             else:
-                cursor = conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,))
+                async with conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)) as cursor:
+                    rows = await cursor.fetchall()
 
             sessions = []
-            for row in cursor.fetchall():
+            for row in rows:
                 session = Session(
                     id=row["id"],
                     title=row["title"] or "",
@@ -228,21 +247,22 @@ class MemoryStore:
                 sessions.append(session)
             return sessions
 
-    def archive_session(self, session_id: str) -> bool:
-        """Archive a session."""
-        session = self.get_session(session_id)
+    async def archive_session(self, session_id: str) -> bool:
+        """Archive a session (Async)."""
+        session = await self.get_session(session_id)
         if not session:
             return False
 
         session.archive()
-        self._persist_session(session)
+        await self._persist_session(session)
         return True
 
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a session and its messages."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a session and its messages (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            await conn.commit()
 
         if session_id in self._sessions:
             del self._sessions[session_id]
@@ -252,10 +272,10 @@ class MemoryStore:
 
         return True
 
-    def _persist_session(self, session: Session) -> None:
-        """Persist session to database."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute(
+    async def _persist_session(self, session: Session) -> None:
+        """Persist session to database (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute(
                 """
                 INSERT OR REPLACE INTO sessions (
                     id, title, provider_key, state, summary,
@@ -274,11 +294,12 @@ class MemoryStore:
                     json.dumps(session.metadata),
                 ),
             )
+            await conn.commit()
 
-    def _persist_message(self, session_id: str, message: Message) -> None:
-        """Persist message to database."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute(
+    async def _persist_message(self, session_id: str, message: Message) -> None:
+        """Persist message to database (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute(
                 """
                 INSERT INTO messages (session_id, role, content, timestamp, metadata)
                 VALUES (?, ?, ?, ?, ?)
@@ -291,16 +312,17 @@ class MemoryStore:
                     json.dumps(message.metadata),
                 ),
             )
+            await conn.commit()
 
-    def _load_session(self, session_id: str) -> Optional[Session]:
-        """Load session from database."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
+    async def _load_session(self, session_id: str) -> Optional[Session]:
+        """Load session from database (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
                 "SELECT * FROM sessions WHERE id = ?",
                 (session_id,),
-            )
-            row = cursor.fetchone()
+            ) as cursor:
+                row = await cursor.fetchone()
 
             if not row:
                 return None
@@ -322,28 +344,31 @@ class MemoryStore:
                 session.last_message_at = datetime.fromisoformat(row["last_message_at"])
 
             # Load messages
-            cursor = conn.execute(
+            async with conn.execute(
                 "SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp",
                 (session_id,),
-            )
-            for msg_row in cursor.fetchall():
-                session.messages.append(
-                    Message(
-                        role=msg_row["role"],
-                        content=msg_row["content"],
-                        timestamp=datetime.fromisoformat(msg_row["timestamp"]),
-                        metadata=json.loads(msg_row["metadata"] or "{}"),
+            ) as cursor:
+                for msg_row in await cursor.fetchall():
+                    session.messages.append(
+                        Message(
+                            role=msg_row["role"],
+                            content=msg_row["content"],
+                            timestamp=datetime.fromisoformat(msg_row["timestamp"]),
+                            metadata=json.loads(msg_row["metadata"] or "{}"),
+                        )
                     )
-                )
 
             return session
 
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get memory statistics."""
-        with sqlite3.connect(self._db_path) as conn:
-            sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-            messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-            active = conn.execute("SELECT COUNT(*) FROM sessions WHERE state = 'active'").fetchone()[0]
+    async def get_statistics(self) -> Dict[str, Any]:
+        """Get memory statistics (Async)."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            async with conn.execute("SELECT COUNT(*) FROM sessions") as cursor:
+                sessions = (await cursor.fetchone())[0]
+            async with conn.execute("SELECT COUNT(*) FROM messages") as cursor:
+                messages = (await cursor.fetchone())[0]
+            async with conn.execute("SELECT COUNT(*) FROM sessions WHERE state = 'active'") as cursor:
+                active = (await cursor.fetchone())[0]
 
             return {
                 "total_sessions": sessions,
@@ -351,10 +376,15 @@ class MemoryStore:
                 "active_sessions": active,
             }
 
+    async def vacuum(self) -> None:
+        """Maintenance: Compact database file."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("VACUUM")
+
 
 class SessionManager:
     """
-    High-level session management interface.
+    High-level session management interface (Async).
 
     Provides convenience methods for common session operations.
     """
@@ -362,54 +392,54 @@ class SessionManager:
     def __init__(self, store: Optional[MemoryStore] = None) -> None:
         self._store = store or MemoryStore()
 
-    def get_or_create_session(
+    async def get_or_create_session(
         self,
         session_id: Optional[str] = None,
         provider_key: str = "deepseek",
     ) -> Session:
-        """Get existing session or create a new one."""
+        """Get existing session or create a new one (Async)."""
         if session_id:
-            session = self._store.get_session(session_id)
+            session = await self._store.get_session(session_id)
             if session:
                 return session
 
-        session = self._store.create_session(provider_key=provider_key)
-        self._store.set_current_session(session.id)
+        session = await self._store.create_session(provider_key=provider_key)
+        await self._store.set_current_session(session.id)
         return session
 
-    def remember(
+    async def remember(
         self,
         role: str,
         content: str,
         session_id: Optional[str] = None,
     ) -> Message:
         """
-        Add a memory (message) to the session.
+        Add a memory (message) to the session (Async).
 
         Convenience method for adding messages.
         """
-        session = self._store.get_current_session()
+        session = await self._store.get_current_session()
 
         if not session:
             if session_id:
-                session = self._store.get_session(session_id)
+                session = await self._store.get_session(session_id)
             if not session:
-                session = self._store.create_session()
-                self._store.set_current_session(session.id)
+                session = await self._store.create_session()
+                await self._store.set_current_session(session.id)
 
-        message = self._store.add_message(session.id, role, content)
+        message = await self._store.add_message(session.id, role, content)
         if not message:
             raise RuntimeError(t("errors.message_add_failed", session_id=session.id))
 
         return message
 
-    def recall(
+    async def recall(
         self,
         max_messages: int = 20,
         session_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """
-        Recall recent conversation context.
+        Recall recent conversation context (Async).
 
         Returns list of {role, content} dicts.
         """
@@ -417,26 +447,26 @@ class SessionManager:
         if not target_id:
             return []
 
-        return self._store.get_context(target_id, max_messages)
+        return await self._store.get_context(target_id, max_messages)
 
-    def search(
+    async def search(
         self,
         query: str,
         session_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search through memories."""
-        return self._store.search_messages(query, session_id)
+        """Search through memories (Async)."""
+        return await self._store.search_messages(query, session_id)
 
-    def list_sessions(self, limit: int = 20) -> List[Session]:
-        """List recent sessions."""
-        return self._store.list_sessions(limit=limit)
+    async def list_sessions(self, limit: int = 20) -> List[Session]:
+        """List recent sessions (Async)."""
+        return await self._store.list_sessions(limit=limit)
 
-    def switch_session(self, session_id: str) -> bool:
-        """Switch to a different session."""
-        return self._store.set_current_session(session_id)
+    async def switch_session(self, session_id: str) -> bool:
+        """Switch to a different session (Async)."""
+        return await self._store.set_current_session(session_id)
 
-    def clear_current_session(self) -> bool:
-        """Clear the current session reference."""
+    async def clear_current_session(self) -> bool:
+        """Clear the current session reference (Async)."""
         if self._store._current_session_id:
-            return self._store.archive_session(self._store._current_session_id)
+            return await self._store.archive_session(self._store._current_session_id)
         return False

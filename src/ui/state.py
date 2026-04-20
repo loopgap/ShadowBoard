@@ -8,13 +8,13 @@ import asyncio
 import json
 import logging
 import uuid
-
-logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import main as core
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,7 +42,6 @@ def get_queue_lock() -> asyncio.Lock:
         try:
             _QUEUE_LOCK = asyncio.Lock()
         except RuntimeError:
-            # Fallback if accessed outside of main loop or before loop starts
             return asyncio.Lock()
     return _QUEUE_LOCK
 
@@ -66,22 +65,22 @@ DOCS_DIR = core.STATE_DIR / "docs"
 
 PROVIDERS: Dict[str, Dict[str, str]] = {
     "deepseek": {
-        "label": "DeepSeek",
+        "label": "DeepSeek 网页",
         "url": "https://chat.deepseek.com/",
         "send_mode": "enter",
-        "guide": "建议开启‘回车发送’。如果遇到验证码，请手动完成。",
+        "guide": "推荐新手首选 页面稳定 先登录后做冒烟测试",
     },
     "kimi": {
-        "label": "Kimi (Moonshot)",
+        "label": "Kimi 网页",
         "url": "https://kimi.moonshot.cn/",
         "send_mode": "enter",
-        "guide": "Kimi 网页版响应较快，适合长文本分析。",
+        "guide": "适合长文处理 登录后先执行一次冒烟验证",
     },
     "tongyi": {
-        "label": "通义千问 (Qwen)",
-        "url": "https://tongyi.aliyun.com/",
+        "label": "通义千问 网页",
+        "url": "https://tongyi.aliyun.com/qianwen/",
         "send_mode": "button",
-        "guide": "通义建议使用‘点击按钮’模式进行交互。",
+        "guide": "建议使用点击按钮发送 遇到弹窗先手动关闭",
     },
 }
 PROVIDER_LABEL_TO_KEY: Dict[str, str] = {v["label"]: k for k, v in PROVIDERS.items()}
@@ -89,27 +88,31 @@ PROVIDER_LABEL_TO_KEY: Dict[str, str] = {v["label"]: k for k, v in PROVIDERS.ite
 _DEFAULT_TEMPLATES = {
     "市场分析 (CMO)": {
         "key": "market_analyst",
-        "guide": "从市场规模、竞争对手、用户痛点角度分析议案。",
+        "guide": "从市场规模、竞争对手、用户痛点角度分析议案",
     },
     "技术评估 (CTO)": {
         "key": "tech_lead",
-        "guide": "评估技术可行性、架构复杂度及核心技术栈。",
+        "guide": "评估技术可行性、架构复杂度与核心栈",
     },
     "财务审计 (CFO)": {
         "key": "finance_expert",
-        "guide": "进行成本收益分析，指出潜在财务风险。",
+        "guide": "进行成本收益分析，识别财务风险",
     },
     "风险管理 (Red Team)": {
         "key": "risk_manager",
-        "guide": "寻找法律、合规及逻辑上的致命缺陷点。",
+        "guide": "从法律合规和逻辑漏洞角度做风险评估",
     },
     "董事长总结 (Chairman)": {
         "key": "chairman_summary",
-        "guide": "阅读所有董事记录，给出最终执行/否决建议。",
+        "guide": "汇总分歧与共识并给出最终建议",
+    },
+    "摘要总结": {
+        "key": "summary",
+        "guide": "适合长文快速提炼要点 默认输出结构化结论",
     },
     "自定义原样发送": {
         "key": "custom",
-        "guide": "跳过角色，直接将输入内容发送给当前 AI 平台。",
+        "guide": "不会套模板 直接把输入内容发送给网页 AI",
     },
 }
 
@@ -125,7 +128,6 @@ def load_metadata():
     """从外部 JSON 和 CSS 文件加载元数据，若不存在则保留默认硬编码值"""
     global PROVIDERS, PROVIDER_LABEL_TO_KEY, TEMPLATE_LABEL_TO_KEY, KEY_TO_TEMPLATE_LABEL, TEMPLATE_GUIDE, CUSTOM_CSS
 
-    # 加载 Providers 和 Templates
     meta_path = core.STATE_DIR / "providers.json"
     if meta_path.exists():
         try:
@@ -143,7 +145,6 @@ def load_metadata():
         except Exception as e:
             logger.warning(f"Error loading providers.json: {e}")
 
-    # 加载 CSS
     css_path = core.STATE_DIR / "style.css"
     if css_path.exists():
         CUSTOM_CSS = css_path.read_text(encoding="utf-8")
@@ -157,7 +158,6 @@ def ensure_dirs() -> None:
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# Examples for UI
 EXAMPLE_INPUTS: List[List[str]] = [
     [
         "摘要总结",

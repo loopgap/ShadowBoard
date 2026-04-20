@@ -288,54 +288,61 @@ async def get_first_visible_locator(
     timeout_ms: int = 5000,
 ) -> Optional[Locator]:
     """
-    Find the first visible element matching selectors.
-
-    Uses a multi-stage semantic anchor strategy:
-    1. Try explicit CSS selectors
-    2. Fall back to A11y role-based search
-    3. Try visual placeholders
-
-    Args:
-        page: Playwright page object
-        selectors: List of CSS selectors to try
-        timeout_ms: Timeout in milliseconds
-
-    Returns:
-        Locator object or None if not found
+    强化版语义锚点策略 (Reinforced Semantic Anchor Strategy):
+    1. 显式 CSS 选择器 (Explicit CSS)
+    2. 常见 Test-ID 或 类名模式 (Test-ID / Common Classes)
+    3. A11y Role 角色搜索 (Role-based A11y)
+    4. 模糊占位符匹配 (Visual Placeholders)
+    5. 最后的兜底: 任何可见的输入组件 (Final Fallback)
     """
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-    # Stage 1: Try explicit selectors
+    # Stage 1: Explicit CSS selectors
     for selector in selectors:
         locator = page.locator(selector).first
         try:
-            await locator.wait_for(timeout=timeout_ms // 2, state="visible")
+            await locator.wait_for(timeout=timeout_ms // 3, state="visible")
             return locator
-        except PlaywrightTimeoutError:
-            continue
-        except Exception as e:
-            logger.debug(f"Locator error for {selector}: {e}")
+        except (PlaywrightTimeoutError, Exception):
             continue
 
-    # Stage 2: Semantic fallback (A11y roles)
-    if any("textarea" in s for s in selectors):
-        for role in ["textbox", "searchbox"]:
-            try:
-                loc = page.get_by_role(role).first  # type: ignore
-                if await loc.count() > 0 and await loc.is_visible():
-                    return loc
-            except Exception as e:
-                logger.debug(f"Role search error for {role}: {e}")
+    # Stage 2: Common Test-IDs and Patterns
+    test_ids = ["[data-testid*='chat']", "[id*='input']", "[class*='input']"]
+    for pattern in test_ids:
+        try:
+            loc = page.locator(pattern).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc
+        except Exception:
+            continue
 
-    # Stage 3: Visual placeholder fallback
-    placeholders = ["输入", "message", "chat", "问我", "ask"]
+    # Stage 3: Semantic fallback (A11y roles)
+    for role in ["textbox", "searchbox", "combobox"]:
+        try:
+            loc = page.get_by_role(role).first  # type: ignore
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc
+        except Exception:
+            continue
+
+    # Stage 4: Visual placeholder fallback
+    placeholders = ["输入", "message", "chat", "问我", "ask", "评估", "idea"]
     for placeholder in placeholders:
         try:
             loc = page.get_by_placeholder(placeholder, exact=False).first
             if await loc.count() > 0 and await loc.is_visible():
                 return loc
-        except Exception as e:
-            logger.debug(f"Placeholder search error for {placeholder}: {e}")
+        except Exception:
+            continue
+
+    # Stage 5: Final Fallback - any visible textarea or input
+    for tag in ["textarea", "input"]:
+        try:
+            loc = page.locator(tag).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc
+        except Exception:
+            continue
 
     return None
 
